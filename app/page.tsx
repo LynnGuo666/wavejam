@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { JamEngine, type TrackInfo } from "@/lib/engine";
+import { AiSolo, type AiStatus } from "@/lib/ai-solo";
 import { SONGS } from "@/lib/songs";
 import HandControl from "@/components/HandControl";
 import Stage from "@/components/Stage";
@@ -20,7 +21,8 @@ export default function Home() {
   const engine = engineRef.current;
 
   useEffect(() => {
-    (window as unknown as { __engine: JamEngine }).__engine = engine;
+    (window as unknown as { __engine: JamEngine; __ai: AiSolo }).__engine = engine;
+    (window as unknown as { __engine: JamEngine; __ai: AiSolo }).__ai = aiSoloRef.current!;
   }, [engine]);
 
   const [songId, setSongId] = useState(SONGS[0].id);
@@ -32,7 +34,17 @@ export default function Home() {
   const [handActive, setHandActive] = useState(false);
   const [keyLabel, setKeyLabel] = useState("");
   const [soloFlash, setSoloFlash] = useState<number | null>(null);
+  const [aiMode, setAiMode] = useState(false);
+  const [aiStatus, setAiStatus] = useState<AiStatus>("idle");
+  const aiModeRef = useRef(false);
   const tapTimesRef = useRef<number[]>([]);
+  const aiSoloRef = useRef<AiSolo | null>(null);
+  if (!aiSoloRef.current) {
+    const ai = new AiSolo();
+    ai.onStatus = setAiStatus;
+    ai.onPhrase = (notes) => engine.playAiPhrase(notes);
+    aiSoloRef.current = ai;
+  }
 
   const refreshTracks = useCallback(() => setTracks([...engine.tracks]), [engine]);
 
@@ -125,9 +137,38 @@ export default function Home() {
       engine.playSolo(degree);
       setSoloFlash(degree);
       setTimeout(() => setSoloFlash(null), 180);
+      // AI 对奏开启时，把这个音喂给模型
+      if (aiModeRef.current) {
+        const scale = engine.scale;
+        const pc = scale[degree % scale.length];
+        let midiNote = 60 + engine.keyRoot + pc + 12 * Math.floor(degree / scale.length);
+        while (midiNote > 84) midiNote -= 12;
+        while (midiNote < 48) midiNote += 12;
+        aiSoloRef.current?.addNote(midiNote, {
+          bpm: engine.bpm,
+          keyRoot: engine.keyRoot,
+          scale: engine.scale,
+        });
+      }
     },
     [engine]
   );
+
+  const toggleAi = useCallback(async () => {
+    const ai = aiSoloRef.current;
+    if (!ai) return;
+    if (aiMode) {
+      aiModeRef.current = false;
+      setAiMode(false);
+      setAiStatus("idle");
+      return;
+    }
+    const ok = await ai.ensureLoaded();
+    if (ok) {
+      aiModeRef.current = true;
+      setAiMode(true);
+    }
+  }, [aiMode]);
 
   const soloNoteName = useCallback(
     (degree: number) => {
@@ -318,12 +359,37 @@ export default function Home() {
           )}
           {tracks.length > 0 && (
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-              <div className="flex items-baseline justify-between">
+              <div className="flex items-center justify-between">
                 <h2 className="font-semibold">🎸 即兴 Solo 键盘</h2>
-                <span className="text-xs text-zinc-400">
-                  {keyLabel}五声音阶 · 音符自动卡进 16 分音符，怎么弹都在调上
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-zinc-400">
+                    {keyLabel}五声音阶 · 音符自动卡进 16 分音符，怎么弹都在调上
+                  </span>
+                  <button
+                    onClick={toggleAi}
+                    className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+                      aiMode
+                        ? "bg-violet-500 text-black"
+                        : "border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                  >
+                    🤖 AI 对奏{aiMode ? "中" : ""}
+                  </button>
+                </div>
               </div>
+              {(aiMode || aiStatus === "loading") && (
+                <p className="mt-2 text-xs text-violet-300">
+                  {aiStatus === "loading"
+                    ? "AI 模型加载中（首次约几秒）…"
+                    : aiStatus === "listening"
+                      ? "🎧 AI 正在听你的乐句，停顿一拍它就会接上下一段…"
+                      : aiStatus === "thinking"
+                        ? "🧠 AI 正在即兴创作回应…"
+                        : aiStatus === "error"
+                          ? "模型加载失败，检查网络后重试"
+                          : "弹几个音，AI 会接着你的乐句即兴续写两小节"}
+                </p>
+              )}
               <div className="mt-3 grid grid-cols-8 gap-2">
                 {SOLO_KEYS.map((k, i) => (
                   <motion.button

@@ -158,7 +158,7 @@ interface Slot {
   s: number;
 }
 
-/** 乐队站位：鼓后排正中，主唱前排正中，其余分前后两排弧线错开 */
+/** 乐队站位：鼓后排正中，主唱前排正中，其余按声像 pan 从左到右站位、前后两排错开 */
 function layoutTracks(tracks: TrackInfo[]): Slot[] {
   const slots: Slot[] = tracks.map(() => ({ x: 50, y: 45, s: 1 }));
   const drumsIdx = tracks.findIndex((t) => t.isDrums);
@@ -170,22 +170,19 @@ function layoutTracks(tracks: TrackInfo[]): Slot[] {
     .map((_, i) => i)
     .filter((i) => i !== drumsIdx && i !== vocalIdx);
 
-  // 前排（偶数位）更靠近观众，后排（奇数位）更高更远，两排错开避免拥挤
-  const rows: { list: number[]; yBase: number; yAmp: number; sBase: number; sAmp: number }[] = [
-    { list: mids.filter((_, k) => k % 2 === 0), yBase: 46, yAmp: 18, sBase: 0.9, sAmp: 0.3 },
-    { list: mids.filter((_, k) => k % 2 === 1), yBase: 28, yAmp: 12, sBase: 0.68, sAmp: 0.22 },
+  // 前排（偶数位）更靠近观众，后排（奇数位）更高更远
+  const rows: { list: number[]; y: number; s: number }[] = [
+    { list: mids.filter((_, k) => k % 2 === 0), y: 54, s: 1.05 },
+    { list: mids.filter((_, k) => k % 2 === 1), y: 34, s: 0.78 },
   ];
   for (const row of rows) {
-    const n = row.list.length;
-    row.list.forEach((idx, k) => {
-      const a = (-74 + (148 * k) / Math.max(n - 1, 1)) * (Math.PI / 180);
-      const depth = Math.cos(a); // 中间 1（靠前），两侧小（靠后）
+    for (const idx of row.list) {
       slots[idx] = {
-        x: 50 + 42 * Math.sin(a),
-        y: row.yBase + row.yAmp * (1 - depth),
-        s: row.sBase + row.sAmp * depth,
+        x: 50 + (tracks[idx].pan ?? 0) * 46,
+        y: row.y,
+        s: row.s,
       };
-    });
+    }
   }
   return slots;
 }

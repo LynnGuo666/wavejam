@@ -13,6 +13,8 @@ export interface TrackInfo {
   pendingMuted?: boolean;
   ready: boolean;
   noteCount: number;
+  /** 立体声声像 -1（左）~ 1（右），与舞台站位一致 */
+  pan: number;
 }
 
 interface Voice {
@@ -23,6 +25,23 @@ interface Voice {
 
 const VOCAL_RE = /vox|vocal|lead|melody|voice|ooh|aah/i;
 const FADE = 0.15;
+
+/**
+ * 全局混音总线：压缩 → EQ → 混响 → 限幅。
+ * 所有声部汇到这里再输出，避免干声直出（"毛坯房排练"感的主要来源）。
+ */
+let masterBus: Tone.Compressor | null = null;
+function getMasterBus(): Tone.Compressor {
+  if (!masterBus) {
+    const comp = new Tone.Compressor(-18, 3);
+    const eq = new Tone.EQ3({ low: 1, mid: 0, high: -1 });
+    const reverb = new Tone.Reverb({ decay: 2.4, wet: 0.16 });
+    const limiter = new Tone.Limiter(-1.5);
+    comp.chain(eq, reverb, limiter, Tone.getDestination());
+    masterBus = comp;
+  }
+  return masterBus;
+}
 
 const SOUNDFONT_ALIASES: Record<string, string> = {
   clavi: "clavinet",
@@ -43,9 +62,11 @@ class SynthVoice implements Voice {
     envelope: { attack: 0.01, decay: 0.2, sustain: 0.4, release: 0.8 },
   });
   private gain = new Tone.Gain(1);
+  private panner: Tone.Panner;
 
-  constructor() {
-    this.synth.chain(this.gain, Tone.getDestination());
+  constructor(pan = 0) {
+    this.panner = new Tone.Panner(pan);
+    this.synth.chain(this.gain, this.panner, getMasterBus());
   }
 
   trigger(midi: number, time: number, duration: number, velocity: number) {
@@ -64,22 +85,27 @@ class SynthVoice implements Voice {
   dispose() {
     this.synth.dispose();
     this.gain.dispose();
+    this.panner.dispose();
   }
 }
 
 class SoundfontVoice implements Voice {
   private ctx: AudioContext;
   private gainNode: GainNode;
+  private panNode: StereoPannerNode;
   private instrument: Instrument | null = null;
   private fallback: SynthVoice;
   muted = false;
   onReady?: (ok: boolean) => void;
 
-  constructor(ctx: AudioContext, gmName: string) {
+  constructor(ctx: AudioContext, gmName: string, pan = 0) {
     this.ctx = ctx;
     this.gainNode = ctx.createGain();
-    this.gainNode.connect(ctx.destination);
-    this.fallback = new SynthVoice();
+    this.panNode = ctx.createStereoPanner();
+    this.panNode.pan.value = pan;
+    this.gainNode.connect(this.panNode);
+    Tone.connect(this.panNode, getMasterBus());
+    this.fallback = new SynthVoice(pan);
     Soundfont.instrument(ctx, gmToSoundfontName(gmName), {
       soundfont: "FluidR3_GM",
       destination: this.gainNode,
@@ -110,41 +136,50 @@ class SoundfontVoice implements Voice {
 
   dispose() {
     this.gainNode.disconnect();
+    this.panNode.disconnect();
     this.fallback.dispose();
   }
 }
 
+/** 真实鼓采样（acoustic-kit），替代现场合成鼓 */
 class DrumVoice implements Voice {
-  private kick = new Tone.MembraneSynth({ pitchDecay: 0.04, octaves: 6 });
-  private snare = new Tone.NoiseSynth({ noise: { type: "white" }, envelope: { attack: 0.001, decay: 0.17, sustain: 0 } });
-  private hat = new Tone.MetalSynth({ envelope: { attack: 0.001, decay: 0.05, release: 0.02 }, harmonicity: 5.1 });
   private gain = new Tone.Gain(1);
-  private lastKick = 0;
-  private lastSnare = 0;
-  private lastHat = 0;
+  private sampler: Tone.Sampler;
+  onReady?: (ok: boolean) => void;
 
   constructor() {
-    for (const s of [this.kick, this.snare, this.hat]) s.connect(this.gain);
-    this.hat.volume.value = -18;
-    this.gain.toDestination();
+    this.sampler = new Tone.Sampler({
+      urls: {
+        C1: "kick.mp3",
+        D1: "snare.mp3",
+        "F#1": "hihat.mp3",
+        F1: "tom3.mp3",
+        A1: "tom2.mp3",
+        C2: "tom1.mp3",
+        "C#2": "crash.mp3",
+        "D#2": "ride.mp3",
+      },
+      baseUrl: "https://tonejs.github.io/audio/drum-samples/acoustic-kit/",
+      onload: () => this.onReady?.(true),
+      onerror: () => this.onReady?.(false),
+    });
+    this.sampler.connect(this.gain);
+    this.gain.connect(getMasterBus());
   }
 
-  // 同一音源重复触发的时刻必须严格递增，否则 Tone 会抛错
-  private strict(last: number, time: number) {
-    return time > last ? time : last + 0.005;
+  private static mapNote(midi: number): string {
+    if (midi === 35 || midi === 36) return "C1"; // 底鼓
+    if (midi >= 37 && midi <= 40) return "D1"; // 军鼓/拍手
+    if (midi === 41 || midi === 43) return "F1"; // 落地通鼓
+    if (midi === 45 || midi === 47) return "A1"; // 中通鼓
+    if (midi === 48 || midi === 50) return "C2"; // 高通鼓
+    if ([49, 52, 55, 57].includes(midi)) return "C#2"; // 吊镲
+    if ([51, 53, 59].includes(midi)) return "D#2"; // 叮叮镲
+    return "F#1"; // 踩镲及其余打击乐
   }
 
   trigger(midi: number, time: number, _duration: number, velocity: number) {
-    if (midi === 35 || midi === 36) {
-      this.lastKick = this.strict(this.lastKick, time);
-      this.kick.triggerAttackRelease("C1", 0.2, this.lastKick, velocity);
-    } else if (midi === 38 || midi === 39 || midi === 40) {
-      this.lastSnare = this.strict(this.lastSnare, time);
-      this.snare.triggerAttackRelease(0.15, this.lastSnare, velocity);
-    } else {
-      this.lastHat = this.strict(this.lastHat, time);
-      this.hat.triggerAttackRelease("G5", 0.05, this.lastHat, velocity * 0.7);
-    }
+    this.sampler.triggerAttackRelease(DrumVoice.mapNote(midi), 0.4, time, velocity);
   }
 
   setMuted(muted: boolean) {
@@ -152,7 +187,8 @@ class DrumVoice implements Voice {
   }
 
   dispose() {
-    for (const s of [this.kick, this.snare, this.hat, this.gain]) s.dispose();
+    this.sampler.dispose();
+    this.gain.dispose();
   }
 }
 
@@ -168,11 +204,11 @@ class LeadVoice {
   constructor() {
     this.delay.wet.value = 0.18;
     this.synth.volume.value = -6;
-    this.synth.chain(this.delay, Tone.getDestination());
+    this.synth.chain(this.delay, getMasterBus());
   }
 
-  trigger(midi: number, time: number) {
-    this.synth.triggerAttackRelease(Tone.Frequency(midi, "midi").toFrequency(), "8n", time, 0.8);
+  trigger(midi: number, time: number, duration: Tone.Unit.Time = "8n") {
+    this.synth.triggerAttackRelease(Tone.Frequency(midi, "midi").toFrequency(), duration, time, 0.8);
   }
 
   dispose() {
@@ -246,10 +282,16 @@ export class JamEngine {
     this.detectKey(midi);
 
     const ctx = Tone.getContext().rawContext as AudioContext;
+    // 预扫描：统计旋律轨数量，用于均匀分配立体声声像（与舞台站位一致）
+    const playable = midi.tracks.filter((t) => t.notes.length > 0);
+    const melodicTotal = playable.filter(
+      (t) => t.channel !== 9 && !VOCAL_RE.test(`${t.name ?? ""} ${t.instrument.name}`)
+    ).length;
+    let melodicIdx = 0;
+
     let id = 0;
     const nameCount = new Map<string, number>();
-    for (const track of midi.tracks) {
-      if (track.notes.length === 0) continue;
+    for (const track of playable) {
       const isDrums = track.channel === 9;
       const baseName =
         track.name?.trim() ||
@@ -259,6 +301,13 @@ export class JamEngine {
       const name = count > 1 ? `${baseName} ${count}` : baseName;
       const vocalSource = `${track.name ?? ""} ${track.instrument.name}`;
       const isVocal = !isDrums && VOCAL_RE.test(vocalSource);
+      // 鼓和人声居中，旋律轨从左到右均匀铺开
+      const pan =
+        isDrums || isVocal
+          ? 0
+          : melodicTotal > 1
+            ? -0.7 + (1.4 * melodicIdx++) / (melodicTotal - 1)
+            : 0;
       const info: TrackInfo = {
         id,
         name,
@@ -266,19 +315,23 @@ export class JamEngine {
         isDrums,
         isVocal,
         muted: isVocal,
-        ready: isDrums,
+        ready: false,
         noteCount: track.notes.length,
+        pan,
       };
 
       let voice: Voice;
+      const markReady = (ok: boolean) => {
+        info.ready = true;
+        this.onTrackReady?.(info.id, ok);
+      };
       if (isDrums) {
-        voice = new DrumVoice();
+        const drums = new DrumVoice();
+        drums.onReady = markReady;
+        voice = drums;
       } else {
-        const sf = new SoundfontVoice(ctx, track.instrument.name);
-        sf.onReady = (ok) => {
-          info.ready = true;
-          this.onTrackReady?.(info.id, ok);
-        };
+        const sf = new SoundfontVoice(ctx, track.instrument.name, pan);
+        sf.onReady = markReady;
         voice = sf;
       }
       voice.setMuted(info.muted);
@@ -287,7 +340,10 @@ export class JamEngine {
       const events = track.notes.map((n) => [`${n.ticks}i`, n] as [string, typeof n]);
       const part = new Tone.Part((time, note) => {
         const secondsPerTick = 60 / (Tone.getTransport().bpm.value * midi.header.ppq);
-        voice.trigger(note.midi, time, note.durationTicks * secondsPerTick, note.velocity);
+        // 人性化：力度 ±8%、时值 ±6ms 随机偏移，避免机械感
+        const jitterTime = time + (Math.random() - 0.5) * 0.012;
+        const jitterVel = Math.min(1, note.velocity * (0.92 + Math.random() * 0.16));
+        voice.trigger(note.midi, jitterTime, note.durationTicks * secondsPerTick, jitterVel);
         Tone.getDraw().schedule(() => {
           if (info.muted) return;
           const now = performance.now();
@@ -405,6 +461,24 @@ export class JamEngine {
       }, "@16n");
     } else {
       this.lead.trigger(midiNote, Tone.now());
+    }
+  }
+
+  /**
+   * AI 乐句回放：notes 为相对秒数（生成时 qpm = 当前 BPM，故 1:1 对齐），
+   * 从下个小节边界开始播放，与伴奏严格对齐
+   */
+  playAiPhrase(notes: { pitch: number; startTime: number; endTime: number }[]) {
+    if (!this.lead) this.lead = new LeadVoice();
+    const play = (t0: number) => {
+      for (const n of notes) {
+        this.lead?.trigger(n.pitch, t0 + n.startTime, Math.max(n.endTime - n.startTime, 0.1));
+      }
+    };
+    if (this.state === "playing") {
+      Tone.getTransport().scheduleOnce(play, "@1m");
+    } else {
+      play(Tone.now() + 0.1);
     }
   }
 
