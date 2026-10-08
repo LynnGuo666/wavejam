@@ -189,6 +189,19 @@ class LeadVoice {
   }
 }
 
+/** 主速度：取持续时间最长的那段速度（避免被只占一小节的前奏速度带偏） */
+function dominantTempo(midi: Midi): number {
+  const tempos = midi.header.tempos;
+  if (tempos.length === 0) return 120;
+  const span = new Map<number, number>();
+  tempos.forEach((t, i) => {
+    const end = tempos[i + 1]?.ticks ?? midi.durationTicks;
+    const bpm = Math.round(t.bpm);
+    span.set(bpm, (span.get(bpm) ?? 0) + Math.max(0, end - t.ticks));
+  });
+  return [...span.entries()].reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+}
+
 const KEY_PC: Record<string, number> = {
   C: 0, "C#": 1, Db: 1, D: 2, "D#": 3, Eb: 3, E: 4, F: 5, "F#": 6,
   Gb: 6, G: 7, "G#": 8, Ab: 8, A: 9, "A#": 10, Bb: 10, B: 11,
@@ -229,6 +242,8 @@ export class JamEngine {
   state: EngineState = "idle";
   keyRoot = 0;
   keyMinor = false;
+  /** 每小节几拍（以四分音符为一拍），来自 MIDI 拍号 */
+  beatsPerBar = 4;
   scale: number[] = [0, 2, 4, 7, 9];
   onBeat?: (beat: number) => void;
   /** 某轨实际发声时触发（已节流，用于 UI 演奏动画）；静音轨不触发 */
@@ -254,9 +269,19 @@ export class JamEngine {
     const buffer = await (await fetch(url)).arrayBuffer();
     const midi = new Midi(buffer);
     this.midi = midi;
-    this.baseBpm = Math.round(midi.header.tempos[0]?.bpm ?? 120);
+    this.baseBpm = Math.round(dominantTempo(midi));
     this.bpm = this.baseBpm;
     this.detectKey(midi);
+
+    const transport = Tone.getTransport();
+    // MIDI 文件各自的 PPQ（120/192/384…）与 Tone 的 PPQ 不同，音符位置必须换算，
+    // 否则整首歌会按错误倍速播放，小节线也对不上
+    const tickScale = transport.PPQ / midi.header.ppq;
+    const toToneTicks = (midiTicks: number) => Math.round(midiTicks * tickScale);
+    // 拍号：小节对齐（声部进出、节拍指示）都以它为准
+    const [tsNum, tsDen] = (midi.header.timeSignatures[0]?.timeSignature ?? [4, 4]) as [number, number];
+    transport.timeSignature = [tsNum, tsDen];
+    this.beatsPerBar = Math.max(1, Math.round((tsNum * 4) / tsDen));
 
     const ctx = Tone.getContext().rawContext as AudioContext;
     let id = 0;
@@ -299,7 +324,7 @@ export class JamEngine {
       voice.setMuted(info.muted);
 
       const trackId = id;
-      const events = track.notes.map((n) => [`${n.ticks}i`, n] as [string, typeof n]);
+      const events = track.notes.map((n) => [`${toToneTicks(n.ticks)}i`, n] as [string, typeof n]);
       const part = new Tone.Part((time, note) => {
         const secondsPerTick = 60 / (Tone.getTransport().bpm.value * midi.header.ppq);
         voice.trigger(note.midi, time, note.durationTicks * secondsPerTick, note.velocity);
@@ -318,15 +343,17 @@ export class JamEngine {
       id++;
     }
 
-    const transport = Tone.getTransport();
     transport.bpm.value = this.bpm;
     transport.loop = true;
     transport.loopStart = 0;
-    transport.loopEnd = `${midi.durationTicks}i`;
-    let beat = 0;
+    // 循环终点取整到小节线，循环回来后小节不会错位
+    const barTicks = transport.PPQ * this.beatsPerBar;
+    transport.loopEnd = `${Math.ceil(toToneTicks(midi.durationTicks) / barTicks) * barTicks}i`;
     transport.scheduleRepeat((time) => {
-      const b = beat++;
-      Tone.getDraw().schedule(() => this.onBeat?.(b % 4), time);
+      // 从走带位置算拍号内第几拍（而不是自增计数），循环、暂停后都不会漂
+      const ticks = transport.getTicksAtTime(time);
+      const b = Math.round(ticks / transport.PPQ) % this.beatsPerBar;
+      Tone.getDraw().schedule(() => this.onBeat?.(b), time);
     }, "4n");
 
     this.state = "ready";

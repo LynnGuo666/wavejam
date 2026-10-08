@@ -28,6 +28,7 @@ export default function Home() {
   const [bpm, setBpm] = useState(120);
   const [baseBpm, setBaseBpm] = useState(120);
   const [beat, setBeat] = useState(0);
+  const [beatsPerBar, setBeatsPerBar] = useState(4);
   const [handActive, setHandActive] = useState(false);
   const [dynamics, setDynamicsLevel] = useState<number | null>(null);
   const [keyLabel, setKeyLabel] = useState("");
@@ -52,6 +53,7 @@ export default function Home() {
       });
       await engine.load(song.file);
       setBaseBpm(engine.baseBpm);
+      setBeatsPerBar(engine.beatsPerBar);
       setBpm(engine.baseBpm);
       setKeyLabel(`${NOTE_NAMES[engine.keyRoot]} ${engine.keyMinor ? "小调" : "大调"}`);
       refreshTracks();
@@ -313,7 +315,7 @@ export default function Home() {
             </div>
 
             <div className="mt-4 flex gap-1.5" aria-hidden>
-              {[0, 1, 2, 3].map((i) => (
+              {Array.from({ length: beatsPerBar }, (_, i) => (
                 <span
                   key={i}
                   className={`h-1.5 flex-1 rounded-full transition-colors duration-100 ${
