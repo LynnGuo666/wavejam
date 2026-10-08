@@ -1,16 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
 import { JamEngine, type TrackInfo } from "@/lib/engine";
 import { SONGS } from "@/lib/songs";
 import HandControl from "@/components/HandControl";
-
-const TRACK_COLORS = [
-  "bg-rose-500", "bg-amber-500", "bg-emerald-500", "bg-sky-500",
-  "bg-violet-500", "bg-pink-500", "bg-lime-500", "bg-cyan-500",
-  "bg-orange-500", "bg-indigo-500",
-];
+import Stage from "@/components/Stage";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const SOLO_KEYS = ["a", "s", "d", "f", "g", "h", "j", "k"];
@@ -37,6 +32,7 @@ export default function Home() {
   const [handActive, setHandActive] = useState(false);
   const [keyLabel, setKeyLabel] = useState("");
   const [soloFlash, setSoloFlash] = useState<number | null>(null);
+  const [pulses, setPulses] = useState<Record<number, number>>({});
   const tapTimesRef = useRef<number[]>([]);
 
   const refreshTracks = useCallback(() => setTracks([...engine.tracks]), [engine]);
@@ -46,6 +42,7 @@ export default function Home() {
       const song = SONGS.find((s) => s.id === (sid ?? songId))!;
       setStatus("loading");
       engine.onBeat = (b) => setBeat(b);
+      engine.onNote = (id) => setPulses((p) => ({ ...p, [id]: (p[id] ?? 0) + 1 }));
       engine.onTrackReady = () => refreshTracks();
       engine.onTrackApplied = () => refreshTracks();
       engine.onBpmChange = (v) => setBpm(v);
@@ -306,55 +303,13 @@ export default function Home() {
             </div>
           )}
           {tracks.length > 0 && (
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-              <AnimatePresence>
-                {tracks.map((t, i) => (
-                  <motion.button
-                    key={t.id}
-                    layout
-                    initial={{ opacity: 0, y: 12 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    onClick={() => toggleTrack(t.id)}
-                    className={`relative overflow-hidden rounded-xl border p-4 text-left transition ${
-                      t.pendingMuted !== undefined
-                        ? "border-amber-400 bg-zinc-800 animate-pulse"
-                        : t.muted
-                          ? "border-zinc-800 bg-zinc-900 opacity-40"
-                          : "border-zinc-700 bg-zinc-800"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={`inline-block h-3 w-3 rounded-full ${TRACK_COLORS[i % TRACK_COLORS.length]}`}
-                      />
-                      <span className="text-xs text-zinc-500">{i + 1}</span>
-                    </div>
-                    <div className="mt-2 font-semibold">{t.name}</div>
-                    <div className="text-xs text-zinc-400">
-                      {t.isDrums ? "鼓组" : t.instrument}
-                      {t.isVocal && " · 留给你唱 🎤"}
-                    </div>
-                    {!t.muted && playing && (
-                      <motion.div
-                        key={beat}
-                        initial={{ opacity: 0.35 }}
-                        animate={{ opacity: 0 }}
-                        className={`pointer-events-none absolute inset-0 ${TRACK_COLORS[i % TRACK_COLORS.length]}`}
-                      />
-                    )}
-                    <div className="mt-2 text-xs text-zinc-500">
-                      {t.pendingMuted !== undefined
-                        ? "⏳ 下个小节生效"
-                        : t.ready
-                          ? t.muted
-                            ? "已静音 · 点击加入"
-                            : "演奏中 · 点击静音"
-                          : "音色加载中…"}
-                    </div>
-                  </motion.button>
-                ))}
-              </AnimatePresence>
-            </div>
+            <Stage
+              tracks={tracks}
+              beat={beat}
+              playing={playing}
+              pulses={pulses}
+              onToggle={toggleTrack}
+            />
           )}
           {tracks.length > 0 && (
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">

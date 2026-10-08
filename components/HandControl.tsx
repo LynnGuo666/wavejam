@@ -17,11 +17,12 @@ const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
 // 拍点检测参数
-const VELOCITY_THRESHOLD = 0.12; // 归一化坐标/秒，低于此速度视为抖动
+const VELOCITY_THRESHOLD = 0.15; // 归一化坐标/秒，低于此速度视为抖动
 const REFRACTORY_MS = 240; // 拍点不应期（上限 ~250 BPM）
 const MIN_INTERVAL_MS = 300; // 200 BPM
 const MAX_INTERVAL_MS = 2000; // 30 BPM
 const WINDOW_SIZE = 4; // 用最近 4 个拍间隔取中位数
+const REVERSAL_COS = -0.3; // 速度向量夹角 > ~108° 视为反弹拐点
 
 export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiveChange }: HandControlProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -31,10 +32,9 @@ export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiv
   const [detectedBpm, setDetectedBpm] = useState<number | null>(null);
   const runningRef = useRef(false);
   // 手势跟踪状态
-  const histRef = useRef<{ t: number; y: number }[]>([]);
+  const histRef = useRef<{ t: number; x: number; y: number }[]>([]);
   const lastIctusRef = useRef(0);
   const intervalsRef = useRef<number[]>([]);
-  const lastVyRef = useRef(0);
 
   useEffect(() => {
     return () => {
@@ -47,26 +47,29 @@ export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiv
     setTimeout(() => setBeatFlash(false), 120);
   }
 
-  /** 指挥拍点（ictus）检测：手腕下落转上扬的拐点 = 一拍 */
-  function detectIctus(y: number, t: number) {
+  /** 指挥拍点（ictus）检测：手腕运动方向急剧反转的拐点 = 一拍（与挥动方向无关） */
+  function detectIctus(x: number, y: number, t: number) {
     const hist = histRef.current;
-    hist.push({ t, y });
+    hist.push({ t, x, y });
     while (hist.length > 2 && t - hist[0].t > 1000) hist.shift();
     if (hist.length < 3) return;
 
-    // 两帧滑动平均速度，抗摄像头噪点
+    // 相邻两段的 2D 速度向量
     const n = hist.length;
     const dt1 = (hist[n - 2].t - hist[n - 3].t) / 1000;
     const dt2 = (hist[n - 1].t - hist[n - 2].t) / 1000;
     if (dt1 <= 0 || dt2 <= 0) return;
-    const vy1 = (hist[n - 2].y - hist[n - 3].y) / dt1;
-    const vy2 = (hist[n - 1].y - hist[n - 2].y) / dt2;
-    // vy > 0 = 手在屏幕中下移（挥下），拍点 = 由下落转上扬的瞬间
-    const wasFalling = lastVyRef.current > VELOCITY_THRESHOLD;
-    const nowRising = vy2 < -VELOCITY_THRESHOLD * 0.5;
-    lastVyRef.current = (vy1 + vy2) / 2;
+    const v1x = (hist[n - 2].x - hist[n - 3].x) / dt1;
+    const v1y = (hist[n - 2].y - hist[n - 3].y) / dt1;
+    const v2x = (hist[n - 1].x - hist[n - 2].x) / dt2;
+    const v2y = (hist[n - 1].y - hist[n - 2].y) / dt2;
+    const s1 = Math.hypot(v1x, v1y);
+    const s2 = Math.hypot(v2x, v2y);
+    if (s1 < VELOCITY_THRESHOLD || s2 < VELOCITY_THRESHOLD * 0.4) return;
 
-    if (!wasFalling || !nowRising) return;
+    // 方向反转：两段速度向量夹角足够大 = 拍点
+    const cos = (v1x * v2x + v1y * v2y) / (s1 * s2);
+    if (cos > REVERSAL_COS) return;
     if (t - lastIctusRef.current < REFRACTORY_MS) return;
 
     const last = lastIctusRef.current;
@@ -127,7 +130,7 @@ export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiv
               intervalsRef.current = [];
               lastIctusRef.current = 0;
             }
-            detectIctus(hand[0].y, now); // 手腕
+            detectIctus(hand[0].x, hand[0].y, now); // 手腕
           } else if (handSeen) {
             setHandSeen(false);
             setDetectedBpm(null);
@@ -189,7 +192,7 @@ export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiv
         )}
       </div>
       <p className="text-xs text-zinc-500">
-        像指挥家一样上下挥动手腕——每次挥到底就是一拍，挥多快伴奏就多快（{minBpm}–{maxBpm} BPM），手放下回归原速
+        像指挥家一样挥动手腕——支持真实指挥图案（下-内-外-上），每次方向反转记一拍，挥多快伴奏就多快（{minBpm}–{maxBpm} BPM），手放下回归原速
       </p>
     </div>
   );
