@@ -9,9 +9,14 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.1.0",
+    "@tonejs/midi": "^2.0.28",
+    "motion": "^14.0.0",
     "next": "16.4.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "soundfont-player": "^0.12.0",
+    "tone": "^15.1.22"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
