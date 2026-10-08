@@ -16,18 +16,80 @@ const WASM_URL =
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
+// 拍点检测参数
+const VELOCITY_THRESHOLD = 0.12; // 归一化坐标/秒，低于此速度视为抖动
+const REFRACTORY_MS = 240; // 拍点不应期（上限 ~250 BPM）
+const MIN_INTERVAL_MS = 300; // 200 BPM
+const MAX_INTERVAL_MS = 2000; // 30 BPM
+const WINDOW_SIZE = 4; // 用最近 4 个拍间隔取中位数
+
 export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiveChange }: HandControlProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<"off" | "loading" | "running" | "error">("off");
   const [handSeen, setHandSeen] = useState(false);
-  const smoothRef = useRef<number | null>(null);
+  const [beatFlash, setBeatFlash] = useState(false);
+  const [detectedBpm, setDetectedBpm] = useState<number | null>(null);
   const runningRef = useRef(false);
+  // 手势跟踪状态
+  const histRef = useRef<{ t: number; y: number }[]>([]);
+  const lastIctusRef = useRef(0);
+  const intervalsRef = useRef<number[]>([]);
+  const lastVyRef = useRef(0);
 
   useEffect(() => {
     return () => {
       runningRef.current = false;
     };
   }, []);
+
+  function flashBeat() {
+    setBeatFlash(true);
+    setTimeout(() => setBeatFlash(false), 120);
+  }
+
+  /** 指挥拍点（ictus）检测：手腕下落转上扬的拐点 = 一拍 */
+  function detectIctus(y: number, t: number) {
+    const hist = histRef.current;
+    hist.push({ t, y });
+    while (hist.length > 2 && t - hist[0].t > 1000) hist.shift();
+    if (hist.length < 3) return;
+
+    // 两帧滑动平均速度，抗摄像头噪点
+    const n = hist.length;
+    const dt1 = (hist[n - 2].t - hist[n - 3].t) / 1000;
+    const dt2 = (hist[n - 1].t - hist[n - 2].t) / 1000;
+    if (dt1 <= 0 || dt2 <= 0) return;
+    const vy1 = (hist[n - 2].y - hist[n - 3].y) / dt1;
+    const vy2 = (hist[n - 1].y - hist[n - 2].y) / dt2;
+    // vy > 0 = 手在屏幕中下移（挥下），拍点 = 由下落转上扬的瞬间
+    const wasFalling = lastVyRef.current > VELOCITY_THRESHOLD;
+    const nowRising = vy2 < -VELOCITY_THRESHOLD * 0.5;
+    lastVyRef.current = (vy1 + vy2) / 2;
+
+    if (!wasFalling || !nowRising) return;
+    if (t - lastIctusRef.current < REFRACTORY_MS) return;
+
+    const last = lastIctusRef.current;
+    lastIctusRef.current = t;
+    flashBeat();
+    if (last === 0) return; // 第一拍只作参照
+
+    const interval = t - last;
+    if (interval < MIN_INTERVAL_MS || interval > MAX_INTERVAL_MS) {
+      intervalsRef.current = []; // 间隔异常，重新积累
+      return;
+    }
+    const intervals = intervalsRef.current;
+    intervals.push(interval);
+    if (intervals.length > WINDOW_SIZE) intervals.shift();
+    if (intervals.length < 2) return;
+
+    const sorted = [...intervals].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const bpm = Math.min(maxBpm, Math.max(minBpm, 60000 / median));
+    setDetectedBpm(Math.round(bpm));
+    onBpm(bpm);
+  }
 
   async function start() {
     if (status === "loading" || status === "running") return;
@@ -61,19 +123,15 @@ export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiv
             if (!handSeen) {
               setHandSeen(true);
               onActiveChange?.(true);
+              histRef.current = [];
+              intervalsRef.current = [];
+              lastIctusRef.current = 0;
             }
-            // 手腕纵坐标：y 越小手越高 → BPM 越快
-            const y = hand[0].y;
-            const norm = Math.min(1, Math.max(0, (0.85 - y) / 0.55));
-            const target = minBpm + norm * (maxBpm - minBpm);
-            const prev = smoothRef.current ?? target;
-            const smoothed = prev + (target - prev) * 0.25;
-            smoothRef.current = smoothed;
-            onBpm(smoothed);
+            detectIctus(hand[0].y, now); // 手腕
           } else if (handSeen) {
             setHandSeen(false);
+            setDetectedBpm(null);
             onActiveChange?.(false);
-            smoothRef.current = null;
             onHandLost?.();
           }
         }
@@ -95,28 +153,43 @@ export default function HandControl({ minBpm, maxBpm, onBpm, onHandLost, onActiv
           playsInline
           className="absolute inset-0 h-full w-full object-cover -scale-x-100"
         />
+        {/* 拍点闪烁反馈 */}
+        {status === "running" && (
+          <div
+            className={`absolute inset-0 border-4 rounded-xl transition-opacity duration-150 ${
+              beatFlash ? "border-emerald-400 opacity-100" : "border-emerald-400 opacity-0"
+            }`}
+          />
+        )}
         {status !== "running" && (
           <div className="absolute inset-0 flex items-center justify-center">
             <button
               onClick={start}
               className="rounded-full bg-emerald-500 px-5 py-2 text-sm font-semibold text-black transition hover:bg-emerald-400"
             >
-              {status === "loading" ? "模型加载中…" : status === "error" ? "摄像头不可用" : "开启挥手控速"}
+              {status === "loading" ? "模型加载中…" : status === "error" ? "摄像头不可用" : "开启手势指挥"}
             </button>
           </div>
         )}
         {status === "running" && (
-          <div
-            className={`absolute left-2 top-2 rounded-full px-2 py-0.5 text-xs ${
-              handSeen ? "bg-emerald-500/90 text-black" : "bg-zinc-800/80 text-zinc-300"
-            }`}
-          >
-            {handSeen ? "✋ 已识别 · 手抬高加速" : "挥挥手试试"}
-          </div>
+          <>
+            <div
+              className={`absolute left-2 top-2 rounded-full px-2 py-0.5 text-xs ${
+                handSeen ? "bg-emerald-500/90 text-black" : "bg-zinc-800/80 text-zinc-300"
+              }`}
+            >
+              {handSeen ? "🪄 指挥中" : "伸出手，上下挥"}
+            </div>
+            {detectedBpm !== null && handSeen && (
+              <div className="absolute right-2 top-2 rounded-full bg-black/70 px-2 py-0.5 text-xs text-emerald-400 tabular-nums">
+                {detectedBpm} BPM
+              </div>
+            )}
+          </>
         )}
       </div>
       <p className="text-xs text-zinc-500">
-        手越高节奏越快（{minBpm}–{maxBpm} BPM），手放下恢复原速
+        像指挥家一样上下挥动手腕——每次挥到底就是一拍，挥多快伴奏就多快（{minBpm}–{maxBpm} BPM），手放下回归原速
       </p>
     </div>
   );

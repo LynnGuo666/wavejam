@@ -223,6 +223,8 @@ export class JamEngine {
   keyMinor = false;
   scale: number[] = [0, 2, 4, 7, 9];
   onBeat?: (beat: number) => void;
+  /** 某轨实际发声时触发（已节流，用于 UI 演奏动画）；静音轨不触发 */
+  onNote?: (id: number) => void;
   onTrackReady?: (id: number, ok: boolean) => void;
   onTrackApplied?: (id: number) => void;
   onBpmChange?: (bpm: number) => void;
@@ -231,6 +233,7 @@ export class JamEngine {
   private parts: Tone.Part[] = [];
   private midi: Midi | null = null;
   private lead: LeadVoice | null = null;
+  private noteUiLast = new Map<number, number>();
 
   async load(url: string) {
     this.disposeSong();
@@ -280,10 +283,18 @@ export class JamEngine {
       }
       voice.setMuted(info.muted);
 
+      const trackId = id;
       const events = track.notes.map((n) => [`${n.ticks}i`, n] as [string, typeof n]);
       const part = new Tone.Part((time, note) => {
         const secondsPerTick = 60 / (Tone.getTransport().bpm.value * midi.header.ppq);
         voice.trigger(note.midi, time, note.durationTicks * secondsPerTick, note.velocity);
+        Tone.getDraw().schedule(() => {
+          if (info.muted) return;
+          const now = performance.now();
+          if (now - (this.noteUiLast.get(trackId) ?? 0) < 90) return;
+          this.noteUiLast.set(trackId, now);
+          this.onNote?.(trackId);
+        }, time);
       }, events);
       part.start(0);
 
@@ -408,6 +419,7 @@ export class JamEngine {
     this.parts = [];
     this.voices = [];
     this.tracks = [];
+    this.noteUiLast.clear();
     this.state = "idle";
   }
 }
