@@ -278,7 +278,8 @@ export class JamEngine {
         instrument: isDrums ? "drums" : track.instrument.name,
         isDrums,
         isVocal,
-        muted: isVocal,
+        // 人声类轨道多是和声/合唱铺底，默认和其他声部一起播放
+        muted: false,
         ready: isDrums,
         noteCount: track.notes.length,
       };

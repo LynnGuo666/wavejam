@@ -357,7 +357,7 @@ function Stage({ tracks, playing, bus, onToggle }: StageProps) {
               {t.name}
             </span>
             <span className="hidden h-3 text-[10px] leading-3 text-mute sm:block">
-              {pending ? "下个小节生效" : !t.ready ? "加载中" : t.muted ? (t.isVocal ? "留给你唱" : "点击加入") : ""}
+              {pending ? "下个小节生效" : !t.ready ? "加载中" : t.muted ? "点击加入" : ""}
             </span>
           </button>
         );
