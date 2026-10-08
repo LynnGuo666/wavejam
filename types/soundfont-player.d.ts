@@ -14,6 +14,8 @@ declare module "soundfont-player" {
     soundfont?: "FluidR3_GM" | "MusyngKite";
     format?: "mp3" | "ogg";
     destination?: AudioNode;
+    /** 只解码这些音（MIDI 号），大幅减少 mp3 解码量 */
+    notes?: (number | string)[];
     nameToUrl?: (name: string, soundfont: string, format: string) => string;
   }
   const Soundfont: {

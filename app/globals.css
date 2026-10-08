@@ -1,19 +1,72 @@
 @import "tailwindcss";
 
-:root {
-  --background: #09090b;
-  --foreground: #ededed;
-}
+/* 夜场舞台：靛蓝幕布 + 琥珀色指挥灯 + 玫红拍点 */
+@theme {
+  --color-ink-deep: #0c0d26;
+  --color-ink: #13143a;
+  --color-panel: #1b1c4a;
+  --color-line: #2c2d66;
+  --color-amber: #ffb547;
+  --color-rose: #ff5d8f;
+  --color-ivory: #f3eee3;
+  --color-mute: #8f8dbd;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: system-ui, -apple-system, sans-serif;
-  --font-mono: ui-monospace, monospace;
+  --font-sans: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, #2a1f5c 0%, transparent 60%),
+    var(--color-ink-deep);
+  color: var(--color-ivory);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-amber);
+  outline-offset: 2px;
+}
+
+input[type="range"].tempo {
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-line);
+}
+input[type="range"].tempo::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-amber);
+  box-shadow: 0 0 0 4px rgb(255 181 71 / 0.2);
+  cursor: pointer;
+}
+input[type="range"].tempo::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--color-amber);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.spotlight {
+  transform-origin: top center;
+  animation: spotlight-sway ease-in-out infinite;
+  will-change: transform;
+}
+@keyframes spotlight-sway {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(3deg); }
 }

@@ -1,12 +1,35 @@
 "use client";
 
-import { motion } from "motion/react";
+import { memo, useEffect, useRef } from "react";
 import type { TrackInfo } from "@/lib/engine";
 
 const PALETTE = [
-  "#f43f5e", "#f59e0b", "#10b981", "#0ea5e9", "#8b5cf6",
-  "#ec4899", "#84cc16", "#06b6d4", "#f97316", "#6366f1",
+  "#ffb547", "#ff5d8f", "#7cc8ff", "#b69cff", "#5fe0b7",
+  "#ff8a5c", "#f7e07a", "#ff9ed2", "#8fb3ff", "#c4f07a",
 ];
+
+/**
+ * 音符/节拍事件总线：高频事件直接驱动 DOM 动画，不经过 React 渲染
+ * （每个音符一次 setState 会让整页每秒重渲染上百次）
+ */
+export class StageBus {
+  private noteFns = new Set<(id: number) => void>();
+  private beatFns = new Set<(beat: number) => void>();
+  emitNote(id: number) {
+    this.noteFns.forEach((f) => f(id));
+  }
+  emitBeat(beat: number) {
+    this.beatFns.forEach((f) => f(beat));
+  }
+  onNote(f: (id: number) => void) {
+    this.noteFns.add(f);
+    return () => void this.noteFns.delete(f);
+  }
+  onBeat(f: (beat: number) => void) {
+    this.beatFns.add(f);
+    return () => void this.beatFns.delete(f);
+  }
+}
 
 type Family =
   | "drums" | "vocal" | "keys" | "guitar" | "bass"
@@ -157,172 +180,190 @@ interface Slot {
   s: number;
 }
 
-/** 弧形站位：鼓在后排正中，主唱前排正中，其余沿弧线展开，中间靠前 */
+/** 多排弧形站位：鼓在后排正中，主唱在最前排正中，其余按排展开；排间错位避免标签叠在一起 */
 function layoutTracks(tracks: TrackInfo[]): Slot[] {
-  const slots: Slot[] = tracks.map(() => ({ x: 50, y: 45, s: 1 }));
+  const slots: Slot[] = tracks.map(() => ({ x: 50, y: 60, s: 1 }));
   const drumsIdx = tracks.findIndex((t) => t.isDrums);
   const vocalIdx = tracks.findIndex((t) => t.isVocal);
-  if (drumsIdx >= 0) slots[drumsIdx] = { x: 50, y: 22, s: 1 };
-  if (vocalIdx >= 0) slots[vocalIdx] = { x: 50, y: 68, s: 1.1 };
+  if (drumsIdx >= 0) slots[drumsIdx] = { x: 50, y: 24, s: 0.95 };
+  if (vocalIdx >= 0) slots[vocalIdx] = { x: 50, y: 86, s: 1.05 };
 
-  const mids = tracks
-    .map((_, i) => i)
-    .filter((i) => i !== drumsIdx && i !== vocalIdx);
+  const mids = tracks.map((_, i) => i).filter((i) => i !== drumsIdx && i !== vocalIdx);
   if (mids.length === 0) return slots;
 
-  // 有主唱时跳过弧线正中槽位，避免重叠
-  const slotCount = vocalIdx >= 0 ? mids.length + 1 : mids.length;
-  const angles: number[] = [];
-  for (let i = 0; i < slotCount; i++) {
-    const a = -66 + (132 * i) / Math.max(slotCount - 1, 1);
-    if (vocalIdx >= 0 && Math.abs(a) < 132 / slotCount / 2 && slotCount > 1) continue;
-    angles.push(a);
-  }
+  const PER_ROW = 6;
+  const rows = Math.ceil(mids.length / PER_ROW);
+  const perRow = Math.ceil(mids.length / rows);
+  const yTop = rows === 1 ? 62 : 48;
+  const yBottom = vocalIdx >= 0 ? 70 : 78;
   mids.forEach((idx, k) => {
-    const a = ((angles[k] ?? 0) * Math.PI) / 180;
-    const depth = Math.cos(a);
+    const r = Math.floor(k / perRow);
+    const inRow = Math.min(perRow, mids.length - r * perRow);
+    const c = k - r * perRow;
+    const depth = rows === 1 ? 1 : r / (rows - 1); // 0 = 后排, 1 = 前排
+    const spread = 30 + 8 * depth; // 前排更宽
+    const stagger = rows > 1 && r % 2 === 1 ? 0.5 : 0;
+    const u = inRow === 1 ? 0 : ((c + stagger) / (inRow - 1 + stagger * 2)) * 2 - 1; // -1..1
     slots[idx] = {
-      x: 50 + 37 * Math.sin(a),
-      y: 30 + 34 * depth,
-      s: 0.72 + 0.38 * depth,
+      x: 50 + spread * u,
+      y: yTop + (yBottom - yTop) * depth - 5 * (1 - u * u) * 0.5,
+      s: 0.78 + 0.22 * depth,
     };
   });
   return slots;
 }
 
 const SPOTLIGHTS = [
-  { left: "12%", color: "16,185,129", duration: 5.2 },
-  { left: "38%", color: "139,92,246", duration: 6.4 },
-  { left: "64%", color: "245,158,11", duration: 5.8 },
+  { left: "8%", color: "255,181,71", duration: 7 },
+  { left: "36%", color: "182,156,255", duration: 9 },
+  { left: "62%", color: "255,93,143", duration: 8 },
 ];
 
 interface StageProps {
   tracks: TrackInfo[];
-  beat: number;
   playing: boolean;
-  pulses: Record<number, number>;
+  bus: StageBus;
   onToggle: (id: number) => void;
 }
 
-export default function Stage({ tracks, beat, playing, pulses, onToggle }: StageProps) {
+interface InstrumentEls {
+  bob: HTMLSpanElement | null;
+  icon: HTMLSpanElement | null;
+  ripple: HTMLSpanElement | null;
+}
+
+function Stage({ tracks, playing, bus, onToggle }: StageProps) {
   const slots = layoutTracks(tracks);
+  const elsRef = useRef(new Map<number, InstrumentEls>());
+  const stateRef = useRef({ tracks, playing });
+  useEffect(() => {
+    stateRef.current = { tracks, playing };
+  });
+
+  useEffect(() => {
+    const els = elsRef.current;
+    const offNote = bus.onNote((id) => {
+      const e = els.get(id);
+      e?.icon?.animate([{ transform: "scale(1.14)" }, { transform: "scale(1)" }], {
+        duration: 220,
+        easing: "ease-out",
+      });
+      e?.ripple?.animate(
+        [
+          { opacity: 0.55, transform: "scale(0.7)" },
+          { opacity: 0, transform: "scale(1.5)" },
+        ],
+        { duration: 450, easing: "ease-out" }
+      );
+    });
+    const offBeat = bus.onBeat(() => {
+      const { tracks, playing } = stateRef.current;
+      if (!playing) return;
+      for (const t of tracks) {
+        if (t.muted || !t.ready) continue;
+        els.get(t.id)?.bob?.animate([{ transform: "translateY(-3px)" }, { transform: "translateY(0)" }], {
+          duration: 180,
+          easing: "ease-out",
+        });
+      }
+    });
+    return () => {
+      offNote();
+      offBeat();
+    };
+  }, [bus]);
+
+  const setEl = (id: number, key: keyof InstrumentEls) => (el: HTMLSpanElement | null) => {
+    const map = elsRef.current;
+    const entry = map.get(id) ?? { bob: null, icon: null, ripple: null };
+    entry[key] = el;
+    map.set(id, entry);
+  };
 
   return (
-    <div className="relative aspect-[16/10] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 select-none">
-      {/* 背景墙 */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_0%,rgba(39,39,42,0.9),transparent_60%)]" />
-      {/* 地平线 */}
-      <div className="absolute inset-x-0 top-[38%] h-px bg-gradient-to-r from-transparent via-emerald-500/40 to-transparent" />
+    <div className="relative aspect-[4/5] select-none sm:aspect-[16/10] overflow-hidden rounded-2xl bg-ink ring-1 ring-line">
+      {/* 幕布 */}
+      <div className="absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(255,93,143,0.05)_0_2px,transparent_2px_28px),radial-gradient(ellipse_at_50%_0%,rgba(42,31,92,0.9),transparent_65%)]" />
+      {/* 台口 */}
+      <div className="absolute inset-x-0 top-[38%] h-px bg-gradient-to-r from-transparent via-amber/50 to-transparent" />
       {/* 透视地板 */}
       <div className="absolute inset-x-0 bottom-0 top-[38%] [perspective:400px]">
-        <div className="absolute inset-0 origin-top [transform:rotateX(60deg)] bg-[repeating-linear-gradient(90deg,rgba(16,185,129,0.10)_0_1px,transparent_1px_44px),repeating-linear-gradient(0deg,rgba(16,185,129,0.07)_0_1px,transparent_1px_22px),linear-gradient(to_bottom,rgba(16,185,129,0.10),transparent)]" />
+        <div className="absolute inset-0 origin-top [transform:rotateX(60deg)] bg-[repeating-linear-gradient(90deg,rgba(255,181,71,0.09)_0_1px,transparent_1px_44px),repeating-linear-gradient(0deg,rgba(255,181,71,0.06)_0_1px,transparent_1px_22px),linear-gradient(to_bottom,rgba(255,181,71,0.08),transparent)]" />
       </div>
-      {/* 聚光灯：常亮摆动 + 随节拍呼吸 */}
-      <motion.div
-        key={playing ? beat : -1}
-        initial={{ opacity: 0.9 }}
-        animate={{ opacity: playing ? 0.45 : 0.45 }}
-        transition={{ duration: 0.3 }}
-        className="absolute inset-0"
-      >
-        {SPOTLIGHTS.map((s, i) => (
-          <motion.div
-            key={i}
-            animate={{ rotate: [-3, 3, -3] }}
-            transition={{ duration: s.duration, repeat: Infinity, ease: "easeInOut" }}
-            className="absolute top-0 h-[72%] w-[36%] mix-blend-screen"
-            style={{
-              left: s.left,
-              transformOrigin: "top center",
-              background: `linear-gradient(to bottom, rgba(${s.color},0.35), rgba(${s.color},0.06) 55%, transparent 75%)`,
-              clipPath: "polygon(46% 0, 54% 0, 100% 100%, 0 100%)",
-            }}
-          />
-        ))}
-      </motion.div>
+      {/* 聚光灯：纯 transform 的 CSS 动画，交给合成线程 */}
+      {SPOTLIGHTS.map((s, i) => (
+        <div
+          key={i}
+          className="spotlight pointer-events-none absolute top-0 h-[72%] w-[36%]"
+          style={{
+            left: s.left,
+            animationDuration: `${s.duration}s`,
+            background: `linear-gradient(to bottom, rgba(${s.color},0.22), rgba(${s.color},0.04) 55%, transparent 75%)`,
+            clipPath: "polygon(46% 0, 54% 0, 100% 100%, 0 100%)",
+          }}
+        />
+      ))}
 
       {/* 乐器 */}
       {tracks.map((t, i) => {
         const slot = slots[i];
         const color = PALETTE[i % PALETTE.length];
-        const pulse = pulses[t.id] ?? 0;
         const active = !t.muted && t.ready;
         const pending = t.pendingMuted !== undefined;
+        const size = 56 * slot.s;
         return (
-          <motion.button
+          <button
             key={t.id}
-            layout
-            initial={{ opacity: 0, y: 14 }}
-            animate={{ opacity: 1, y: 0 }}
             onClick={() => onToggle(t.id)}
-            className="absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-0.5"
+            aria-pressed={!t.muted}
+            className="group absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1 rounded-xl p-1 transition-[left,top] duration-500"
             style={{ left: `${slot.x}%`, top: `${slot.y}%`, zIndex: Math.round(slot.y) }}
           >
             <span className="relative flex items-center justify-center">
-              {/* 脚下光晕 */}
+              {/* 脚下光晕（径向渐变代替 blur 滤镜） */}
               <span
-                className="absolute -bottom-1 h-3 w-16 rounded-[50%] blur-md transition-opacity duration-500"
-                style={{ background: color, opacity: active ? 0.45 : 0.08 }}
+                className="absolute -bottom-2 h-5 w-20 rounded-[50%] transition-opacity duration-500"
+                style={{
+                  background: `radial-gradient(closest-side, ${color}, transparent)`,
+                  opacity: active ? 0.5 : 0.08,
+                }}
               />
               {/* 发声涟漪 */}
-              {active && pulse > 0 && (
-                <motion.span
-                  key={pulse}
-                  initial={{ opacity: 0.55, scale: 0.7 }}
-                  animate={{ opacity: 0, scale: 1.5 }}
-                  transition={{ duration: 0.45, ease: "easeOut" }}
-                  className="absolute h-16 w-16 rounded-full border-2"
-                  style={{ borderColor: color }}
-                />
-              )}
-              {/* 排队提示圈 */}
+              <span
+                ref={setEl(t.id, "ripple")}
+                className="absolute h-16 w-16 rounded-full border-2 opacity-0"
+                style={{ borderColor: color }}
+              />
               {pending && (
-                <span className="absolute h-[4.5rem] w-[4.5rem] animate-pulse rounded-full border-2 border-dashed border-amber-400" />
+                <span className="absolute h-[4.5rem] w-[4.5rem] animate-pulse rounded-full border-2 border-dashed border-amber" />
               )}
-              {/* 乐器本体：节拍起伏 + 发声弹跳 */}
-              <motion.span
-                key={playing && active ? beat : -1}
-                initial={{ y: active && playing ? -2 : 0 }}
-                animate={{ y: 0 }}
-                transition={{ duration: 0.18 }}
-                className="block"
-              >
-                <motion.span
-                  key={pulse}
-                  initial={{ scale: pulse > 0 ? 1.14 : 1 }}
-                  animate={{ scale: 1 }}
-                  transition={{ duration: 0.22, ease: "easeOut" }}
-                  className={`block transition-[opacity,filter] duration-500 ${
+              <span ref={setEl(t.id, "bob")} className="block">
+                <span
+                  ref={setEl(t.id, "icon")}
+                  className={`block h-[calc(var(--size)*0.7)] w-[calc(var(--size)*0.7)] transition-[opacity,filter] duration-500 sm:h-(--size) sm:w-(--size) group-hover:brightness-125 ${
                     t.muted ? "opacity-30 grayscale" : ""
                   }`}
-                  style={{ color, width: 56 * slot.s, height: 56 * slot.s }}
+                  style={{ color, ["--size" as string]: `${size}px` }}
                 >
                   <InstrumentIcon family={familyOf(t)} />
-                </motion.span>
-              </motion.span>
+                </span>
+              </span>
             </span>
             <span
-              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold backdrop-blur-sm ${
-                t.muted ? "text-zinc-500" : "text-zinc-100"
+              className={`max-w-[4.5rem] truncate rounded-full bg-ink-deep/80 px-1.5 py-0.5 text-[9px] sm:max-w-[7.5rem] sm:px-2 sm:text-[11px] font-semibold ${
+                t.muted ? "text-mute" : "text-ivory"
               }`}
-              style={{ background: "rgba(9,9,11,0.65)" }}
             >
               {t.name}
             </span>
-            <span className="text-[9px] text-zinc-500" style={{ background: "rgba(9,9,11,0.4)" }}>
-              {pending
-                ? "⏳ 下个小节生效"
-                : !t.ready
-                  ? "音色加载中…"
-                  : t.muted
-                    ? t.isVocal
-                      ? "🎤 留给你唱 · 点击开麦"
-                      : "已静音 · 点击加入"
-                    : "演奏中"}
+            <span className="hidden h-3 text-[10px] leading-3 text-mute sm:block">
+              {pending ? "下个小节生效" : !t.ready ? "加载中" : t.muted ? (t.isVocal ? "留给你唱" : "点击加入") : ""}
             </span>
-          </motion.button>
+          </button>
         );
       })}
     </div>
   );
 }
+
+export default memo(Stage);

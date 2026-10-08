@@ -5,7 +5,7 @@ import { motion } from "motion/react";
 import { JamEngine, type TrackInfo } from "@/lib/engine";
 import { SONGS } from "@/lib/songs";
 import HandControl from "@/components/HandControl";
-import Stage from "@/components/Stage";
+import Stage, { StageBus } from "@/components/Stage";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const SOLO_KEYS = ["a", "s", "d", "f", "g", "h", "j", "k"];
@@ -15,9 +15,8 @@ const DETENT_RATIOS = [0.5, 0.75, 0.875, 1, 1.125, 1.25, 1.5, 1.6, 2];
 const SNAP_TOLERANCE = 2.5; // BPM 在挡位 ±2.5 内自动吸附
 
 export default function Home() {
-  const engineRef = useRef<JamEngine | null>(null);
-  if (!engineRef.current) engineRef.current = new JamEngine();
-  const engine = engineRef.current;
+  const [engine] = useState(() => new JamEngine());
+  const [bus] = useState(() => new StageBus());
 
   useEffect(() => {
     (window as unknown as { __engine: JamEngine }).__engine = engine;
@@ -32,7 +31,6 @@ export default function Home() {
   const [handActive, setHandActive] = useState(false);
   const [keyLabel, setKeyLabel] = useState("");
   const [soloFlash, setSoloFlash] = useState<number | null>(null);
-  const [pulses, setPulses] = useState<Record<number, number>>({});
   const tapTimesRef = useRef<number[]>([]);
 
   const refreshTracks = useCallback(() => setTracks([...engine.tracks]), [engine]);
@@ -41,11 +39,16 @@ export default function Home() {
     async (sid?: string) => {
       const song = SONGS.find((s) => s.id === (sid ?? songId))!;
       setStatus("loading");
-      engine.onBeat = (b) => setBeat(b);
-      engine.onNote = (id) => setPulses((p) => ({ ...p, [id]: (p[id] ?? 0) + 1 }));
-      engine.onTrackReady = () => refreshTracks();
-      engine.onTrackApplied = () => refreshTracks();
-      engine.onBpmChange = (v) => setBpm(v);
+      engine.setHandlers({
+        onBeat: (b) => {
+          bus.emitBeat(b);
+          setBeat(b);
+        },
+        onNote: (id) => bus.emitNote(id),
+        onTrackReady: () => refreshTracks(),
+        onTrackApplied: () => refreshTracks(),
+        onBpmChange: (v) => setBpm(v),
+      });
       await engine.load(song.file);
       setBaseBpm(engine.baseBpm);
       setBpm(engine.baseBpm);
@@ -55,7 +58,7 @@ export default function Home() {
       await engine.play();
       setStatus("playing");
     },
-    [engine, songId, refreshTracks]
+    [engine, bus, songId, refreshTracks]
   );
 
   const selectSong = useCallback(
@@ -157,196 +160,219 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKey);
   }, [togglePlay, tapTempo, toggleTrack, playSolo, tracks, status]);
 
+  const returnToBase = useCallback(() => engine.returnToBase(), [engine]);
+
   const minBpm = Math.round(baseBpm * 0.5);
   const maxBpm = Math.round(baseBpm * 2);
   const handMinBpm = Math.round(baseBpm * 0.6);
   const handMaxBpm = Math.round(baseBpm * 1.6);
   const bpmRatio = baseBpm > 0 ? bpm / baseBpm : 1;
   const playing = status === "playing";
+  const song = SONGS.find((s) => s.id === songId)!;
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 p-6 text-zinc-100">
-      <header className="flex items-end justify-between">
+    <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-5 px-4 py-6 sm:px-6 lg:py-8">
+      <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-xs uppercase tracking-widest text-emerald-400">
-            全民K歌 · 即兴模式 · Demo
-          </p>
-          <h1 className="text-3xl font-bold">挥手即兴 WaveJam</h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            不再跟伴奏 —— 伴奏跟着你。挥手控速，点击指挥声部进出。
+          <h1 className="font-serif text-4xl font-bold tracking-tight sm:text-5xl">
+            WaveJam <span className="text-2xl font-normal text-mute sm:text-3xl">挥手即兴</span>
+          </h1>
+          <p className="mt-2 max-w-xl text-sm text-mute">
+            你挥手，乐队跟着你的速度演奏。点舞台上的乐器让它加入或退场，用键盘即兴一段 solo。
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {SONGS.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => selectSong(s.id)}
-              className={`rounded-full px-3 py-1 text-sm transition ${
-                s.id === songId
-                  ? "bg-emerald-500 text-black font-semibold"
-                  : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-              }`}
-            >
-              {s.title}
-            </button>
-          ))}
-        </div>
+        <nav aria-label="选择歌曲" className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+          <ul className="flex gap-2">
+            {SONGS.map((s) => {
+              const on = s.id === songId;
+              return (
+                <li key={s.id}>
+                  <button
+                    onClick={() => selectSong(s.id)}
+                    aria-pressed={on}
+                    className={`flex flex-col whitespace-nowrap rounded-xl px-3 py-2 text-left transition ${
+                      on ? "bg-ivory text-ink-deep" : "bg-panel/60 text-ivory hover:bg-panel"
+                    }`}
+                  >
+                    <span className="text-sm font-semibold leading-tight">{s.title}</span>
+                    <span className={`text-[11px] leading-tight ${on ? "text-ink-deep/60" : "text-mute"}`}>
+                      {s.artist}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
       </header>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
-        <section className="flex flex-col gap-4">
-          <HandControl
-            minBpm={handMinBpm}
-            maxBpm={handMaxBpm}
-            onBpm={(v) => changeBpm(v)}
-            onHandLost={() => engine.returnToBase()}
-            onActiveChange={setHandActive}
-          />
-
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-            <div className="flex items-baseline justify-between">
-              <motion.div
-                key={playing ? beat : -1}
-                initial={{ scale: 1.25 }}
-                animate={{ scale: 1 }}
-                className="text-5xl font-black tabular-nums text-emerald-400"
-              >
-                {bpm}
-              </motion.div>
-              <span className="text-sm text-zinc-400">
-                BPM · {bpmRatio.toFixed(2)}×（原速 {baseBpm}）
-              </span>
-            </div>
-            <input
-              type="range"
-              min={minBpm}
-              max={maxBpm}
-              value={bpm}
-              onChange={(e) => changeBpm(Number(e.target.value))}
-              className="mt-3 w-full accent-emerald-500"
-            />
-            <div className="mt-1 flex justify-between text-[10px] text-zinc-500">
-              {[0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => (
-                <span
-                  key={r}
-                  className={Math.abs(bpmRatio - r) < 0.02 ? "text-emerald-400 font-bold" : ""}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_360px]">
+        <section className="order-2 flex min-w-0 flex-col gap-5 lg:order-1">
+          {tracks.length > 0 ? (
+            <Stage tracks={tracks} playing={playing} bus={bus} onToggle={toggleTrack} />
+          ) : (
+            <div className="relative flex aspect-[4/5] flex-col sm:aspect-[16/10] items-center justify-center gap-5 overflow-hidden rounded-2xl bg-ink ring-1 ring-line">
+              <div className="absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(255,93,143,0.07)_0_2px,transparent_2px_28px)]" />
+              <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-amber/10 to-transparent" />
+              <p className="relative font-serif text-2xl sm:text-3xl">{song.title}</p>
+              {status === "loading" ? (
+                <p className="relative text-sm text-mute">乐手正在入场…</p>
+              ) : (
+                <button
+                  onClick={() => load()}
+                  className="relative rounded-full bg-amber px-8 py-3 text-base font-bold text-ink-deep transition hover:brightness-110"
                 >
-                  {r}×
-                </span>
-              ))}
+                  开始演奏
+                </button>
+              )}
             </div>
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={() => changeBpm(baseBpm * 0.5)}
-                className="flex-1 rounded-lg border border-zinc-700 py-1.5 text-sm font-semibold text-zinc-200 transition hover:bg-zinc-800"
-              >
-                ½× 慢速氛围
-              </button>
-              <button
-                onClick={() => changeBpm(baseBpm)}
-                className="flex-1 rounded-lg border border-zinc-700 py-1.5 text-sm font-semibold text-zinc-200 transition hover:bg-zinc-800"
-              >
-                1× 原速
-              </button>
-              <button
-                onClick={() => changeBpm(baseBpm * 2)}
-                className="flex-1 rounded-lg border border-zinc-700 py-1.5 text-sm font-semibold text-zinc-200 transition hover:bg-zinc-800"
-              >
-                2× 双倍速
-              </button>
-            </div>
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={togglePlay}
-                disabled={status === "idle" || status === "loading"}
-                className="flex-1 rounded-lg bg-emerald-500 py-2 font-semibold text-black transition hover:bg-emerald-400 disabled:opacity-30"
-              >
-                {playing ? "暂停" : "播放"}（空格）
-              </button>
-              <button
-                onClick={tapTempo}
-                className="flex-1 rounded-lg border border-zinc-700 py-2 font-semibold text-zinc-200 transition hover:bg-zinc-800"
-              >
-                点按测速（T）
-              </button>
-            </div>
-            <div className="mt-3 flex gap-1">
-              {[0, 1, 2, 3].map((i) => (
-                <motion.div
-                  key={i}
-                  animate={
-                    playing && beat === i
-                      ? { backgroundColor: "#10b981", scale: 1.3 }
-                      : { backgroundColor: "#3f3f46", scale: 1 }
-                  }
-                  className="h-2 flex-1 rounded-full"
-                />
-              ))}
-            </div>
-          </div>
-        </section>
+          )}
 
-        <section className="flex flex-col gap-4">
-          {status === "idle" && (
-            <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-zinc-700">
-              <button
-                onClick={() => load()}
-                className="rounded-full bg-emerald-500 px-8 py-4 text-lg font-bold text-black transition hover:bg-emerald-400"
-              >
-                ▶ 加载并开始演奏
-              </button>
-            </div>
-          )}
-          {status === "loading" && (
-            <div className="flex flex-1 items-center justify-center rounded-xl border border-zinc-800 text-zinc-400">
-              正在加载 MIDI 与音色…
-            </div>
-          )}
           {tracks.length > 0 && (
-            <Stage
-              tracks={tracks}
-              beat={beat}
-              playing={playing}
-              pulses={pulses}
-              onToggle={toggleTrack}
-            />
-          )}
-          {tracks.length > 0 && (
-            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-              <div className="flex items-baseline justify-between">
-                <h2 className="font-semibold">🎸 即兴 Solo 键盘</h2>
-                <span className="text-xs text-zinc-400">
-                  {keyLabel}五声音阶 · 音符自动卡进 16 分音符，怎么弹都在调上
+            <div className="rounded-2xl bg-ink p-4 ring-1 ring-line sm:p-5">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="font-serif text-lg">即兴 solo</h2>
+                <span className="text-xs text-mute">
+                  {keyLabel}五声音阶，自动对齐到十六分音符，怎么弹都在调上
                 </span>
               </div>
-              <div className="mt-3 grid grid-cols-8 gap-2">
+              <div className="mt-4 grid grid-cols-8 gap-1.5 sm:gap-2">
                 {SOLO_KEYS.map((k, i) => (
                   <motion.button
                     key={k}
                     onClick={() => playSolo(i)}
                     animate={
                       soloFlash === i
-                        ? { scale: 0.92, backgroundColor: "#10b981" }
-                        : { scale: 1, backgroundColor: "#27272a" }
+                        ? { y: 4, backgroundColor: "#ff5d8f", color: "#0c0d26" }
+                        : { y: 0, backgroundColor: "#f3eee3", color: "#0c0d26" }
                     }
-                    transition={{ duration: 0.15 }}
-                    className="flex flex-col items-center rounded-lg py-3 text-zinc-100 hover:bg-zinc-700"
+                    transition={{ duration: 0.12 }}
+                    className="flex h-24 flex-col items-center justify-end rounded-b-lg rounded-t-sm pb-2 shadow-[inset_0_-6px_0_rgba(12,13,38,0.15)] sm:h-28"
                   >
-                    <span className="font-bold">{soloNoteName(i)}</span>
-                    <span className="mt-1 text-[10px] uppercase text-zinc-500">{k}</span>
+                    <span className="font-serif text-lg font-bold">{soloNoteName(i)}</span>
+                    <kbd className="mt-0.5 font-sans text-[10px] uppercase opacity-50">{k}</kbd>
                   </motion.button>
                 ))}
               </div>
             </div>
           )}
-          {tracks.length > 0 && (
-            <p className="text-xs text-zinc-500">
-              快捷键：空格 播放/暂停 · T 点按测速 · 数字 1-{tracks.length} 开关声部（下个小节生效）· A-K Solo
-              {handActive && " · ✋ 手势控速中"}
-            </p>
-          )}
         </section>
+
+        <aside className="order-1 flex flex-col gap-5 lg:order-2">
+          <HandControl
+            minBpm={handMinBpm}
+            maxBpm={handMaxBpm}
+            refBpm={baseBpm}
+            onBpm={changeBpm}
+            onHandLost={returnToBase}
+            onActiveChange={setHandActive}
+          />
+
+          <div className="rounded-2xl bg-ink p-5 ring-1 ring-line">
+            <div className="flex items-end justify-between gap-3">
+              <div className="flex items-baseline gap-2 font-serif">
+                <span className="text-3xl text-amber">♩</span>
+                <span className="text-2xl text-mute">=</span>
+                <motion.span
+                  key={playing ? beat : -1}
+                  initial={{ scale: beat === 0 && playing ? 1.12 : 1.04 }}
+                  animate={{ scale: 1 }}
+                  transition={{ duration: 0.2 }}
+                  className="inline-block origin-bottom-left text-6xl font-bold tabular-nums"
+                >
+                  {bpm}
+                </motion.span>
+              </div>
+              <div className="pb-2 text-right">
+                <p className="font-serif text-lg italic text-amber">{tempoTerm(bpm)}</p>
+                <p className="text-xs tabular-nums text-mute">
+                  {bpmRatio.toFixed(2)}× 原速 {baseBpm}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 flex gap-1.5" aria-hidden>
+              {[0, 1, 2, 3].map((i) => (
+                <span
+                  key={i}
+                  className={`h-1.5 flex-1 rounded-full transition-colors duration-100 ${
+                    playing && beat === i ? (i === 0 ? "bg-rose" : "bg-amber") : "bg-line"
+                  }`}
+                />
+              ))}
+            </div>
+
+            <input
+              type="range"
+              aria-label="速度"
+              min={minBpm}
+              max={maxBpm}
+              value={bpm}
+              onChange={(e) => changeBpm(Number(e.target.value))}
+              className="tempo mt-6 w-full"
+            />
+            <div className="mt-2 grid grid-cols-3 gap-1 rounded-xl bg-ink-deep p-1 text-sm">
+              {[
+                { r: 0.5, label: "½× 慢" },
+                { r: 1, label: "原速" },
+                { r: 2, label: "2× 快" },
+              ].map(({ r, label }) => {
+                const on = Math.abs(bpmRatio - r) < 0.02;
+                return (
+                  <button
+                    key={r}
+                    onClick={() => changeBpm(baseBpm * r)}
+                    className={`rounded-lg py-1.5 font-medium transition ${
+                      on ? "bg-panel text-amber" : "text-mute hover:text-ivory"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                onClick={togglePlay}
+                disabled={status === "idle" || status === "loading"}
+                className="rounded-xl bg-amber py-2.5 font-semibold text-ink-deep transition hover:brightness-110 disabled:opacity-30"
+              >
+                {playing ? "暂停" : "播放"}
+              </button>
+              <button
+                onClick={tapTempo}
+                className="rounded-xl py-2.5 font-semibold text-ivory ring-1 ring-line transition hover:bg-panel"
+              >
+                点按测速
+              </button>
+            </div>
+          </div>
+
+          <dl className="hidden grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 px-1 text-xs text-mute lg:grid">
+            <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">空格</kbd></dt>
+            <dd>播放 / 暂停</dd>
+            <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">T</kbd></dt>
+            <dd>跟着节奏连按，设定速度</dd>
+            <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">1–9</kbd></dt>
+            <dd>乐器加入 / 退场，下个小节生效</dd>
+            <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">A–K</kbd></dt>
+            <dd>弹 solo</dd>
+          </dl>
+          {handActive && <span className="sr-only">手势控速中</span>}
+        </aside>
       </div>
     </main>
   );
+}
+
+/** 按速度给出意大利文速度术语，像乐谱上的速度记号 */
+function tempoTerm(bpm: number) {
+  if (bpm < 60) return "Largo";
+  if (bpm < 76) return "Adagio";
+  if (bpm < 108) return "Andante";
+  if (bpm < 120) return "Moderato";
+  if (bpm < 156) return "Allegro";
+  if (bpm < 176) return "Vivace";
+  return "Presto";
 }

@@ -33,6 +33,12 @@ function gmToSoundfontName(name: string): string {
   return SOUNDFONT_ALIASES[normalized] ?? normalized;
 }
 
+// MIDI.js 预渲染音色的 key 是降号音名（Db4、Bb3…）
+const SF_NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+function midiToSfName(m: number) {
+  return `${SF_NOTE_NAMES[m % 12]}${Math.floor(m / 12) - 1}`;
+}
+
 function prettifyInstrument(name: string): string {
   return name.replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -75,7 +81,7 @@ class SoundfontVoice implements Voice {
   muted = false;
   onReady?: (ok: boolean) => void;
 
-  constructor(ctx: AudioContext, gmName: string) {
+  constructor(ctx: AudioContext, gmName: string, notes?: string[]) {
     this.ctx = ctx;
     this.gainNode = ctx.createGain();
     this.gainNode.connect(ctx.destination);
@@ -83,6 +89,7 @@ class SoundfontVoice implements Voice {
     Soundfont.instrument(ctx, gmToSoundfontName(gmName), {
       soundfont: "FluidR3_GM",
       destination: this.gainNode,
+      notes,
     })
       .then((inst) => {
         this.instrument = inst;
@@ -229,6 +236,10 @@ export class JamEngine {
   onTrackApplied?: (id: number) => void;
   onBpmChange?: (bpm: number) => void;
 
+  setHandlers(h: Pick<JamEngine, "onBeat" | "onNote" | "onTrackReady" | "onTrackApplied" | "onBpmChange">) {
+    Object.assign(this, h);
+  }
+
   private voices: Voice[] = [];
   private parts: Tone.Part[] = [];
   private midi: Midi | null = null;
@@ -274,7 +285,8 @@ export class JamEngine {
       if (isDrums) {
         voice = new DrumVoice();
       } else {
-        const sf = new SoundfontVoice(ctx, track.instrument.name);
+        const usedNotes = [...new Set(track.notes.map((n) => midiToSfName(n.midi)))];
+        const sf = new SoundfontVoice(ctx, track.instrument.name, usedNotes);
         sf.onReady = (ok) => {
           info.ready = true;
           this.onTrackReady?.(info.id, ok);
@@ -288,13 +300,12 @@ export class JamEngine {
       const part = new Tone.Part((time, note) => {
         const secondsPerTick = 60 / (Tone.getTransport().bpm.value * midi.header.ppq);
         voice.trigger(note.midi, time, note.durationTicks * secondsPerTick, note.velocity);
-        Tone.getDraw().schedule(() => {
-          if (info.muted) return;
-          const now = performance.now();
-          if (now - (this.noteUiLast.get(trackId) ?? 0) < 90) return;
-          this.noteUiLast.set(trackId, now);
-          this.onNote?.(trackId);
-        }, time);
+        // 静音轨不调度 UI 回调；同轨 90ms 内只通知一次
+        if (info.muted) return;
+        const last = this.noteUiLast.get(trackId) ?? -1;
+        if (time - last < 0.09) return;
+        this.noteUiLast.set(trackId, time);
+        Tone.getDraw().schedule(() => this.onNote?.(trackId), time);
       }, events);
       part.start(0);
 
