@@ -2,13 +2,18 @@
 
 import { memo, useEffect, useRef, useState } from "react";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
+import { Conductor, type Pt } from "@/lib/conductor";
 
 interface HandControlProps {
   minBpm: number;
   maxBpm: number;
   /** 当前参考速度，用于把半速/倍速挥动折叠到最近的合理速度 */
   refBpm: number;
+  /** 挥一下管几拍 */
+  beatsPerGesture: number;
   onBpm: (bpm: number) => void;
+  /** 力度 0..1（挥得大 = 强） */
+  onDynamics?: (level: number) => void;
   onIctus?: () => void;
   onHandLost?: () => void;
   onActiveChange?: (active: boolean) => void;
@@ -19,27 +24,12 @@ const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/was
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
-// 拍点检测参数
-const SMOOTH_ALPHA = 0.55; // 位置 EMA 平滑系数（越大越跟手）
-const AMP_RATIO = 0.25; // 回弹幅度阈值 = 手掌尺寸 × 该比例（与离镜头远近无关）
-const AMP_MIN = 0.02;
-const AMP_MAX = 0.08;
-const MIN_INTERVAL_MS = 280; // ~214 BPM
-const MAX_INTERVAL_MS = 2000; // 30 BPM
-const WINDOW_SIZE = 4; // 最近 4 个拍间隔，去掉最大最小后取均值
-const TEMPO_JUMP = 0.35; // 新间隔偏离中位数超过 35% 视为换速，立即重新积累
 const LOST_GRACE_MS = 500; // 手短暂丢失不算放下
 const GPU_TIMEOUT_MS = 6000;
 const TRAIL_MS = 900;
 const MARK_MS = 700;
 
 type Status = "off" | "loading" | "running" | "denied" | "error";
-
-interface Pt {
-  t: number;
-  x: number;
-  y: number;
-}
 
 function HandControl(props: HandControlProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -48,6 +38,7 @@ function HandControl(props: HandControlProps) {
   const [handSeen, setHandSeen] = useState(false);
   const [beatCount, setBeatCount] = useState(0);
   const [detectedBpm, setDetectedBpm] = useState<number | null>(null);
+  const [rebounding, setRebounding] = useState(false);
 
   // 回调与参数走 ref，避免检测循环闭包拿到旧值
   const propsRef = useRef(props);
@@ -109,83 +100,34 @@ function HandControl(props: HandControlProps) {
     // 跟踪状态（全部是循环内局部变量，不受 React 渲染影响）
     let seen = false;
     let lastSeenAt = 0;
-    let smooth: Pt | null = null;
     const trail: Pt[] = [];
     const marks: Pt[] = [];
-    // 下拍检测：手往下落到最低点再回弹 = 一拍（ictus）
-    let phase: "down" | "up" = "down";
-    let extreme: Pt | null = null;
-    let lastIctus = 0;
-    let intervals: number[] = [];
     let beats = 0;
+    let reboundTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const conductor = new Conductor(() => propsRef.current, {
+      onIctus: (p) => {
+        marks.push(p);
+        beats++;
+        setBeatCount(beats);
+        propsRef.current.onIctus?.();
+      },
+      onTempo: (bpm, source) => {
+        setDetectedBpm(Math.round(bpm));
+        propsRef.current.onBpm(bpm);
+        if (source === "rebound") {
+          // 回弹预判触发：短暂提示“看到你抬手变速了”
+          setRebounding(true);
+          clearTimeout(reboundTimer);
+          reboundTimer = setTimeout(() => setRebounding(false), 600);
+        }
+      },
+      onDynamics: (level) => propsRef.current.onDynamics?.(level),
+    });
 
     const resetTracking = () => {
-      smooth = null;
+      conductor.reset();
       trail.length = 0;
-      phase = "down";
-      extreme = null;
-      lastIctus = 0;
-      intervals = [];
-    };
-
-    const emitIctus = (p: Pt) => {
-      marks.push(p);
-      beats++;
-      setBeatCount(beats);
-      propsRef.current.onIctus?.();
-
-      const last = lastIctus;
-      lastIctus = p.t;
-      if (last === 0) return;
-      const interval = p.t - last;
-      if (interval < MIN_INTERVAL_MS) return;
-      if (interval > MAX_INTERVAL_MS) {
-        intervals = [];
-        return;
-      }
-      if (intervals.length > 0) {
-        const med = median(intervals);
-        if (Math.abs(interval - med) / med > TEMPO_JUMP) intervals = [];
-      }
-      intervals.push(interval);
-      if (intervals.length > WINDOW_SIZE) intervals.shift();
-      if (intervals.length < 2) return;
-
-      const { minBpm, maxBpm, refBpm, onBpm } = propsRef.current;
-      const bpm = foldBpm(60000 / trimmedMean(intervals), refBpm, minBpm, maxBpm);
-      setDetectedBpm(Math.round(bpm));
-      onBpm(bpm);
-    };
-
-    const track = (raw: Pt, handSize: number) => {
-      const s: Pt = smooth
-        ? {
-            t: raw.t,
-            x: smooth.x + SMOOTH_ALPHA * (raw.x - smooth.x),
-            y: smooth.y + SMOOTH_ALPHA * (raw.y - smooth.y),
-          }
-        : raw;
-      smooth = s;
-      trail.push(s);
-
-      const amp = Math.min(AMP_MAX, Math.max(AMP_MIN, handSize * AMP_RATIO));
-      // 图像坐标 y 向下为正：下落 = y 增大
-      if (!extreme) {
-        extreme = s;
-      } else if (phase === "down") {
-        if (s.y >= extreme.y) extreme = s;
-        else if (extreme.y - s.y > amp) {
-          if (extreme.t - lastIctus >= MIN_INTERVAL_MS * 0.8 || lastIctus === 0) emitIctus(extreme);
-          phase = "up";
-          extreme = s;
-        }
-      } else {
-        if (s.y <= extreme.y) extreme = s;
-        else if (s.y - extreme.y > amp) {
-          phase = "down";
-          extreme = s;
-        }
-      }
     };
 
     const draw = (now: number) => {
@@ -265,7 +207,7 @@ function HandControl(props: HandControlProps) {
           const x = ids.reduce((a, i) => a + hand[i].x, 0) / ids.length;
           const y = ids.reduce((a, i) => a + hand[i].y, 0) / ids.length;
           const handSize = Math.hypot(hand[9].x - hand[0].x, hand[9].y - hand[0].y);
-          track({ t: now, x, y }, handSize);
+          trail.push(conductor.push({ t: now, x, y }, handSize));
         } else if (seen && now - lastSeenAt > LOST_GRACE_MS) {
           seen = false;
           resetTracking();
@@ -283,6 +225,7 @@ function HandControl(props: HandControlProps) {
     cleanupRef.current = () => {
       alive = false;
       cancelAnimationFrame(raf);
+      clearTimeout(reboundTimer);
       stream.getTracks().forEach((t) => t.stop());
       landmarker.close();
     };
@@ -301,6 +244,7 @@ function HandControl(props: HandControlProps) {
   }
 
   const running = status === "running";
+  const dotCount = Math.max(1, Math.round(4 / props.beatsPerGesture));
 
   return (
     <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl bg-ink-deep ring-1 ring-line">
@@ -329,7 +273,7 @@ function HandControl(props: HandControlProps) {
               ? "摄像头权限被拒绝。在浏览器地址栏允许摄像头后再试一次。"
               : status === "error"
                 ? "手势模型没能加载，检查网络后再试一次。没有摄像头也可以用下方的点按测速。"
-                : "手掌对着镜头上下挥，每次落到最低点就是一拍。"}
+                : "手掌对着镜头上下挥，每次落到最低点算一下。落下后抬手快就加速、慢就放慢，挥大声音强、挥小声音弱。"}
           </p>
         </div>
       )}
@@ -352,12 +296,13 @@ function HandControl(props: HandControlProps) {
             </button>
           </div>
           <div className="absolute inset-x-3 bottom-3 flex items-end justify-between">
+            {/* 一小节内的挥动位置：每拍一挥 4 个点，两拍一挥 2 个，一小节一挥 1 个 */}
             <span className="flex gap-1.5">
-              {[0, 1, 2, 3].map((i) => (
+              {Array.from({ length: dotCount }, (_, i) => (
                 <span
                   key={i}
                   className={`h-2 w-2 rounded-full transition-colors duration-150 ${
-                    handSeen && beatCount > 0 && (beatCount - 1) % 4 === i ? "bg-rose" : "bg-ivory/25"
+                    handSeen && beatCount > 0 && (beatCount - 1) % dotCount === i ? "bg-rose" : "bg-ivory/25"
                   }`}
                 />
               ))}
@@ -365,8 +310,8 @@ function HandControl(props: HandControlProps) {
             <span className="rounded-md bg-ink-deep/70 px-2 py-1 font-serif text-sm tabular-nums text-amber backdrop-blur">
               {handSeen
                 ? detectedBpm !== null
-                  ? `♩ = ${detectedBpm}`
-                  : "再挥两拍…"
+                  ? `${rebounding ? "抬手变速 " : ""}♩ = ${detectedBpm}`
+                  : "再挥两下…"
                 : "手放下 = 回到原速"}
             </span>
           </div>
@@ -422,25 +367,4 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       }
     );
   });
-}
-
-/** 去掉最大最小值后取均值：比中位数更不受帧率量化影响 */
-function trimmedMean(xs: number[]) {
-  const s = [...xs].sort((a, b) => a - b);
-  const k = s.length >= 4 ? s.slice(1, -1) : s;
-  return k.reduce((a, b) => a + b, 0) / k.length;
-}
-
-function median(xs: number[]) {
-  const s = [...xs].sort((a, b) => a - b);
-  return s[Math.floor(s.length / 2)];
-}
-
-/** 半速/倍速挥动折叠到离参考速度最近、且在允许范围内的速度 */
-function foldBpm(bpm: number, ref: number, min: number, max: number) {
-  const candidates = [bpm / 2, bpm, bpm * 2].filter((b) => b >= min * 0.9 && b <= max * 1.1);
-  const best = candidates.length
-    ? candidates.reduce((a, b) => (Math.abs(Math.log(b / ref)) < Math.abs(Math.log(a / ref)) ? b : a))
-    : bpm;
-  return Math.min(max, Math.max(min, best));
 }

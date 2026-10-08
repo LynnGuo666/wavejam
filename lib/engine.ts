@@ -84,7 +84,8 @@ class SoundfontVoice implements Voice {
   constructor(ctx: AudioContext, gmName: string, notes?: string[]) {
     this.ctx = ctx;
     this.gainNode = ctx.createGain();
-    this.gainNode.connect(ctx.destination);
+    // 接入 Tone 主输出，才能被整体力度（主音量）控制
+    Tone.connect(this.gainNode, Tone.getDestination());
     this.fallback = new SynthVoice();
     Soundfont.instrument(ctx, gmToSoundfontName(gmName), {
       soundfont: "FluidR3_GM",
@@ -362,6 +363,15 @@ export class JamEngine {
     this.bpm = Math.round(bpm);
     Tone.getTransport().bpm.rampTo(this.bpm, 0.4);
     this.onBpmChange?.(this.bpm);
+  }
+
+  /**
+   * 力度（指挥图示大小）：0 = pp，1 = f。映射到主音量 -16dB ~ 0dB，
+   * 平滑过渡避免逐拍跳变
+   */
+  setDynamics(level: number) {
+    const l = Math.min(1, Math.max(0, level));
+    Tone.getDestination().volume.rampTo(-16 * (1 - l), 0.3);
   }
 
   /** 手放下后，用 ~1.5s 滑回原速 */
