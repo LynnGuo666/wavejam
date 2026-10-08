@@ -32,7 +32,6 @@ export default function Home() {
   const [handActive, setHandActive] = useState(false);
   const [keyLabel, setKeyLabel] = useState("");
   const [soloFlash, setSoloFlash] = useState<number | null>(null);
-  const [pulses, setPulses] = useState<Record<number, number>>({});
   const tapTimesRef = useRef<number[]>([]);
 
   const refreshTracks = useCallback(() => setTracks([...engine.tracks]), [engine]);
@@ -42,7 +41,6 @@ export default function Home() {
       const song = SONGS.find((s) => s.id === (sid ?? songId))!;
       setStatus("loading");
       engine.onBeat = (b) => setBeat(b);
-      engine.onNote = (id) => setPulses((p) => ({ ...p, [id]: (p[id] ?? 0) + 1 }));
       engine.onTrackReady = () => refreshTracks();
       engine.onTrackApplied = () => refreshTracks();
       engine.onBpmChange = (v) => setBpm(v);
@@ -113,6 +111,13 @@ export default function Home() {
       refreshTracks();
     },
     [engine, refreshTracks]
+  );
+
+  const subscribeNote = useCallback(
+    (cb: ((id: number) => void) | undefined) => {
+      engine.onNote = cb;
+    },
+    [engine]
   );
 
   const playSolo = useCallback(
@@ -207,7 +212,7 @@ export default function Home() {
             <div className="flex items-baseline justify-between">
               <motion.div
                 key={playing ? beat : -1}
-                initial={{ scale: 1.25 }}
+                initial={{ scale: 1.08 }}
                 animate={{ scale: 1 }}
                 className="text-5xl font-black tabular-nums text-emerald-400"
               >
@@ -305,9 +310,9 @@ export default function Home() {
           {tracks.length > 0 && (
             <Stage
               tracks={tracks}
-              beat={beat}
               playing={playing}
-              pulses={pulses}
+              bpm={bpm}
+              onSubscribeNote={subscribeNote}
               onToggle={toggleTrack}
             />
           )}

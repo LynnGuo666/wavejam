@@ -291,7 +291,7 @@ export class JamEngine {
         Tone.getDraw().schedule(() => {
           if (info.muted) return;
           const now = performance.now();
-          if (now - (this.noteUiLast.get(trackId) ?? 0) < 90) return;
+          if (now - (this.noteUiLast.get(trackId) ?? 0) < 480) return;
           this.noteUiLast.set(trackId, now);
           this.onNote?.(trackId);
         }, time);

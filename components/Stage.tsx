@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { motion } from "motion/react";
 import type { TrackInfo } from "@/lib/engine";
 
@@ -17,7 +18,7 @@ function familyOf(t: TrackInfo): Family {
   if (t.isVocal) return "vocal";
   const n = t.instrument.toLowerCase();
   if (/bass/.test(n)) return "bass";
-  if (/piano|organ|harpsichord|clav|celesta|accordion|keyboard/.test(n)) return "keys";
+  if (/piano|organ|harpsichord|clav|celesta|accordion|keyboard|xylophone|marimba|vibraphone|glockenspiel|tubular|steel drums|dulcimer/.test(n)) return "keys";
   if (/guitar|banjo|mandolin|shamisen|sitar|koto/.test(n)) return "guitar";
   if (/violin|viola|cello|contrabass|strings|harp|ensemble|pizzicato/.test(n)) return "strings";
   if (/trumpet|trombone|tuba|horn|brass/.test(n)) return "brass";
@@ -157,36 +158,35 @@ interface Slot {
   s: number;
 }
 
-/** 弧形站位：鼓在后排正中，主唱前排正中，其余沿弧线展开，中间靠前 */
+/** 乐队站位：鼓后排正中，主唱前排正中，其余分前后两排弧线错开 */
 function layoutTracks(tracks: TrackInfo[]): Slot[] {
   const slots: Slot[] = tracks.map(() => ({ x: 50, y: 45, s: 1 }));
   const drumsIdx = tracks.findIndex((t) => t.isDrums);
   const vocalIdx = tracks.findIndex((t) => t.isVocal);
-  if (drumsIdx >= 0) slots[drumsIdx] = { x: 50, y: 22, s: 1 };
-  if (vocalIdx >= 0) slots[vocalIdx] = { x: 50, y: 68, s: 1.1 };
+  if (drumsIdx >= 0) slots[drumsIdx] = { x: 50, y: 20, s: 0.95 };
+  if (vocalIdx >= 0) slots[vocalIdx] = { x: 50, y: 70, s: 1.1 };
 
   const mids = tracks
     .map((_, i) => i)
     .filter((i) => i !== drumsIdx && i !== vocalIdx);
-  if (mids.length === 0) return slots;
 
-  // 有主唱时跳过弧线正中槽位，避免重叠
-  const slotCount = vocalIdx >= 0 ? mids.length + 1 : mids.length;
-  const angles: number[] = [];
-  for (let i = 0; i < slotCount; i++) {
-    const a = -66 + (132 * i) / Math.max(slotCount - 1, 1);
-    if (vocalIdx >= 0 && Math.abs(a) < 132 / slotCount / 2 && slotCount > 1) continue;
-    angles.push(a);
+  // 前排（偶数位）更靠近观众，后排（奇数位）更高更远，两排错开避免拥挤
+  const rows: { list: number[]; yBase: number; yAmp: number; sBase: number; sAmp: number }[] = [
+    { list: mids.filter((_, k) => k % 2 === 0), yBase: 46, yAmp: 18, sBase: 0.9, sAmp: 0.3 },
+    { list: mids.filter((_, k) => k % 2 === 1), yBase: 28, yAmp: 12, sBase: 0.68, sAmp: 0.22 },
+  ];
+  for (const row of rows) {
+    const n = row.list.length;
+    row.list.forEach((idx, k) => {
+      const a = (-74 + (148 * k) / Math.max(n - 1, 1)) * (Math.PI / 180);
+      const depth = Math.cos(a); // 中间 1（靠前），两侧小（靠后）
+      slots[idx] = {
+        x: 50 + 42 * Math.sin(a),
+        y: row.yBase + row.yAmp * (1 - depth),
+        s: row.sBase + row.sAmp * depth,
+      };
+    });
   }
-  mids.forEach((idx, k) => {
-    const a = ((angles[k] ?? 0) * Math.PI) / 180;
-    const depth = Math.cos(a);
-    slots[idx] = {
-      x: 50 + 37 * Math.sin(a),
-      y: 30 + 34 * depth,
-      s: 0.72 + 0.38 * depth,
-    };
-  });
   return slots;
 }
 
@@ -198,14 +198,24 @@ const SPOTLIGHTS = [
 
 interface StageProps {
   tracks: TrackInfo[];
-  beat: number;
   playing: boolean;
-  pulses: Record<number, number>;
+  bpm: number;
+  onSubscribeNote: (cb: ((id: number) => void) | undefined) => void;
   onToggle: (id: number) => void;
 }
 
-export default function Stage({ tracks, beat, playing, pulses, onToggle }: StageProps) {
+export default function Stage({ tracks, playing, bpm, onSubscribeNote, onToggle }: StageProps) {
   const slots = layoutTracks(tracks);
+  const [pulses, setPulses] = useState<Record<number, number>>({});
+
+  // 订阅引擎发声事件：状态留在 Stage 内部，不连累整页重渲染
+  useEffect(() => {
+    onSubscribeNote((id) => setPulses((p) => ({ ...p, [id]: (p[id] ?? 0) + 1 })));
+    return () => onSubscribeNote(undefined);
+  }, [onSubscribeNote]);
+
+  // 循环动画节奏跟随 BPM，不需要按拍重挂载
+  const beatSec = 60 / Math.max(bpm, 40);
 
   return (
     <div className="relative aspect-[16/10] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 select-none">
@@ -217,12 +227,14 @@ export default function Stage({ tracks, beat, playing, pulses, onToggle }: Stage
       <div className="absolute inset-x-0 bottom-0 top-[38%] [perspective:400px]">
         <div className="absolute inset-0 origin-top [transform:rotateX(60deg)] bg-[repeating-linear-gradient(90deg,rgba(16,185,129,0.10)_0_1px,transparent_1px_44px),repeating-linear-gradient(0deg,rgba(16,185,129,0.07)_0_1px,transparent_1px_22px),linear-gradient(to_bottom,rgba(16,185,129,0.10),transparent)]" />
       </div>
-      {/* 聚光灯：常亮摆动 + 随节拍呼吸 */}
+      {/* 聚光灯：常亮摆动 + 一个小节周期的缓慢呼吸 */}
       <motion.div
-        key={playing ? beat : -1}
-        initial={{ opacity: 0.9 }}
-        animate={{ opacity: playing ? 0.45 : 0.45 }}
-        transition={{ duration: 0.3 }}
+        animate={playing ? { opacity: [0.42, 0.5, 0.42] } : { opacity: 0.42 }}
+        transition={
+          playing
+            ? { duration: beatSec * 4, repeat: Infinity, ease: "easeInOut" }
+            : { duration: 0.4 }
+        }
         className="absolute inset-0"
       >
         {SPOTLIGHTS.map((s, i) => (
@@ -264,14 +276,14 @@ export default function Stage({ tracks, beat, playing, pulses, onToggle }: Stage
                 className="absolute -bottom-1 h-3 w-16 rounded-[50%] blur-md transition-opacity duration-500"
                 style={{ background: color, opacity: active ? 0.45 : 0.08 }}
               />
-              {/* 发声涟漪 */}
+              {/* 发声涟漪：约每拍最多一次，缓慢淡出 */}
               {active && pulse > 0 && (
                 <motion.span
-                  key={pulse}
-                  initial={{ opacity: 0.55, scale: 0.7 }}
-                  animate={{ opacity: 0, scale: 1.5 }}
-                  transition={{ duration: 0.45, ease: "easeOut" }}
-                  className="absolute h-16 w-16 rounded-full border-2"
+                  key={`ripple-${pulse}`}
+                  initial={{ opacity: 0.28, scale: 0.8 }}
+                  animate={{ opacity: 0, scale: 1.25 }}
+                  transition={{ duration: 0.9, ease: "easeOut" }}
+                  className="absolute h-16 w-16 rounded-full border"
                   style={{ borderColor: color }}
                 />
               )}
@@ -279,45 +291,43 @@ export default function Stage({ tracks, beat, playing, pulses, onToggle }: Stage
               {pending && (
                 <span className="absolute h-[4.5rem] w-[4.5rem] animate-pulse rounded-full border-2 border-dashed border-amber-400" />
               )}
-              {/* 乐器本体：节拍起伏 + 发声弹跳 */}
+              {/* 乐器本体：一个小节周期的缓慢起伏（不重挂载） */}
               <motion.span
-                key={playing && active ? beat : -1}
-                initial={{ y: active && playing ? -2 : 0 }}
-                animate={{ y: 0 }}
-                transition={{ duration: 0.18 }}
+                animate={active && playing ? { y: [0, -2, 0] } : { y: 0 }}
+                transition={
+                  active && playing
+                    ? { duration: beatSec * 4, repeat: Infinity, ease: "easeInOut" }
+                    : { duration: 0.3 }
+                }
                 className="block"
               >
-                <motion.span
-                  key={pulse}
-                  initial={{ scale: pulse > 0 ? 1.14 : 1 }}
-                  animate={{ scale: 1 }}
-                  transition={{ duration: 0.22, ease: "easeOut" }}
+                <span
                   className={`block transition-[opacity,filter] duration-500 ${
                     t.muted ? "opacity-30 grayscale" : ""
                   }`}
                   style={{ color, width: 56 * slot.s, height: 56 * slot.s }}
                 >
                   <InstrumentIcon family={familyOf(t)} />
-                </motion.span>
+                </span>
               </motion.span>
             </span>
             <span
-              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold backdrop-blur-sm ${
+              className={`max-w-28 truncate whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold backdrop-blur-sm ${
                 t.muted ? "text-zinc-500" : "text-zinc-100"
               }`}
               style={{ background: "rgba(9,9,11,0.65)" }}
             >
               {t.name}
             </span>
-            <span className="text-[9px] text-zinc-500" style={{ background: "rgba(9,9,11,0.4)" }}>
+            <span className="whitespace-nowrap text-[9px] text-zinc-500">
               {pending
-                ? "⏳ 下个小节生效"
+                ? "⏳ 下个小节"
                 : !t.ready
-                  ? "音色加载中…"
+                  ? "加载中…"
                   : t.muted
                     ? t.isVocal
-                      ? "🎤 留给你唱 · 点击开麦"
-                      : "已静音 · 点击加入"
+                      ? "🎤 留给你唱"
+                      : "已静音"
                     : "演奏中"}
             </span>
           </motion.button>
