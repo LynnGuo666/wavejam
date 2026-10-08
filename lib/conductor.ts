@@ -2,7 +2,10 @@
  * 指挥手势解析（纯逻辑，不依赖 DOM / React，便于离线测试）
  *
  * 按真实指挥的读法：
- * - 拍点（ictus）：手落到最低点再回弹的那一刻，拍间隔决定速度
+ * - 拍点（ictus）：手落到最低点再回弹的那一刻
+ * - 挥动快慢决定的是“倍率”（相对值），不是绝对 BPM：手刚出现时先挥几下，
+ *   以你自然的挥动快慢为基准 = 保持当前速度；之后挥得比基准快 20%，音乐就快 20%。
+ *   所以挥多快、一下管几拍都随意，舒服就行
  * - 回弹（rebound）：拍后上抬的快慢预告下一拍何时到来——抬得快 = 要加速，抬得慢 = 要放慢。
  *   乐手看的就是这个，所以拍后手一抬过半高就提前调整速度，不必等下一拍落下。
  *   计时用“落拍弹跳宽度”：下落穿过半高 → 触底 → 上抬穿过半高。两个穿越点都在手速最快处，
@@ -19,34 +22,36 @@ export interface Pt {
 export interface ConductorRange {
   minBpm: number;
   maxBpm: number;
-  /** 当前实际播放速度：手刚出现时以它为起点，避免第一下就跳变 */
+  /** 当前实际播放速度：定标时你的自然挥速就对应它 */
   currentBpm: number;
-  /** 挥一下管几拍：1 = 每拍一挥；2 = 两拍一挥；4 = 一小节一挥（省力） */
-  beatsPerGesture: number;
 }
 
 export interface ConductorHandlers {
   onIctus?: (p: Pt) => void;
   onTempo?: (bpm: number, source: "beat" | "rebound") => void;
+  /** 定标完成：之后的挥速按相对这个基准的倍率变速 */
+  onCalibrated?: () => void;
   /** 力度 0..1（0 = pp，1 = f） */
   onDynamics?: (level: number) => void;
 }
 
 const SMOOTH_ALPHA = 0.55; // 位置 EMA 平滑系数（越大越跟手）
-const AMP_RATIO = 0.25; // 回弹幅度阈值 = 手掌尺寸 × 该比例（与离镜头远近无关）
-const AMP_MIN = 0.02;
+const AMP_RATIO = 0.4; // 回弹幅度阈值 = 手掌尺寸 × 该比例（与离镜头远近无关）；小晃动不算一下
+const AMP_MIN = 0.03;
 const AMP_MAX = 0.08;
-// 以下是“两次挥动之间”的物理间隔，不是拍间隔
-const MIN_INTERVAL_MS = 280; // 手再快也挥不过这个
-const MAX_INTERVAL_MS = 2000; // 每拍一挥时的上限；几拍一挥时按拍数放宽（最多 4s）
-const maxInterval = (k: number) => Math.min(4000, MAX_INTERVAL_MS * k);
+// 两次挥动之间的物理间隔范围
+const MIN_INTERVAL_MS = 350; // 手再快也挥不过这个
+const MAX_INTERVAL_MS = 4000; // 再慢就当作停下了
 const WINDOW_SIZE = 4;
+const CALIB_INTERVALS = 2; // 稳定挥满 2 个间隔（3 下）即定标
 const TEMPO_JUMP = 0.25; // 新间隔偏离中位数超过 25% 视为换速，立即重新积累
 const RECENT_WEIGHT = 0.35; // 最新一拍在速度估计里的权重，越大越跟手
 // 回弹预测
 const REBOUND_RATIO_INIT = 0.35; // 弹跳宽度 / 拍间隔 的初值（每个人挥法不同，逐拍学习）
 const REBOUND_LEARN = 0.3;
-const REBOUND_TRIGGER = 0.1; // 预测速度与当前偏差超过 10% 才提前调整
+const REBOUND_TRIGGER = 0.15; // 预测速度与当前偏差超过 15% 才算一次“明显的快抬/慢抬”
+const REBOUND_CONFIRM = 2; // 连续 2 下同向的明显快抬/慢抬才提前调整
+const REBOUND_COOLDOWN = 2; // 提前调整后至少隔 2 下再允许下一次
 const REBOUND_MIN_SAMPLES = 3; // 学到至少 3 下的挥法比例后才开始预测
 const REBOUND_BLEND = 0.6; // 提前调整时向预测值靠近的比例
 // 力度：一拍的垂直幅度 / 手掌尺寸
@@ -69,11 +74,14 @@ export class Conductor {
   private pendingDir: -1 | 0 | 1 = 0; // 等待确认的大幅变速方向
   private reboundRatio = REBOUND_RATIO_INIT;
   private reboundSamples = 0;
+  private reboundVotes = 0; // 连续同向明显快抬(+)/慢抬(-)的次数
+  private reboundCooldown = 0; // 剩余冷却的挥动数
   private reboundDur: number | null = null; // 本拍的弹跳宽度，待下一拍落下后用来学习比例
   private halfLevel: number | null = null; // 上一拍“半高”的 y 值
   private downCross: number | null = null; // 本拍下落穿过半高的时刻
   private dynamics: number | null = null;
-  private gestureBeats = 1;
+  /** 定标基准：自然挥动间隔 ↔ 当时的播放速度 */
+  private anchor: { interval: number; bpm: number } | null = null;
 
   constructor(
     private getRange: () => ConductorRange,
@@ -89,6 +97,10 @@ export class Conductor {
     return this.bpm;
   }
 
+  get calibrated() {
+    return this.anchor !== null;
+  }
+
   reset() {
     this.smooth = null;
     this.phase = "down";
@@ -102,6 +114,9 @@ export class Conductor {
     this.dynamics = null;
     this.reboundSamples = 0;
     this.pendingDir = 0;
+    this.anchor = null;
+    this.reboundVotes = 0;
+    this.reboundCooldown = 0;
   }
 
   push(raw: Pt, handSize: number): Pt {
@@ -155,25 +170,20 @@ export class Conductor {
     this.lastIctus = p;
     if (!last) return;
 
+    if (this.reboundCooldown > 0) this.reboundCooldown--;
     const interval = p.t - last.t;
     const rebound = this.reboundDur;
     this.reboundDur = null;
-    const k = this.getRange().beatsPerGesture;
-    if (k !== this.gestureBeats) {
-      // 换了挥法，旧的间隔和回弹比例都不再适用
-      this.gestureBeats = k;
-      this.intervals = [];
-      this.reboundSamples = 0;
-    }
     // 间隔异常（漏检、多检或突然换速）：这一下的回弹不可信，清空已学的挥法比例重新学，期间不做回弹预测
     const anomalous =
       interval < MIN_INTERVAL_MS ||
-      interval > maxInterval(k) ||
+      interval > MAX_INTERVAL_MS ||
       (this.intervals.length > 0 && Math.abs(interval - median(this.intervals)) / median(this.intervals) > TEMPO_JUMP);
     if (anomalous) {
       this.intervals = [];
       this.reboundSamples = 0;
-      if (interval < MIN_INTERVAL_MS || interval > maxInterval(k)) return;
+      this.reboundVotes = 0;
+      if (interval < MIN_INTERVAL_MS || interval > MAX_INTERVAL_MS) return;
     } else if (rebound !== null) {
       const r = clamp(rebound / interval, 0.1, 0.8);
       this.reboundRatio = this.reboundSamples === 0 ? r : this.reboundRatio + REBOUND_LEARN * (r - this.reboundRatio);
@@ -181,10 +191,18 @@ export class Conductor {
     }
     this.intervals.push(interval);
     if (this.intervals.length > WINDOW_SIZE) this.intervals.shift();
-    if (this.intervals.length < 2) return;
+    if (this.intervals.length < CALIB_INTERVALS) return;
 
+    if (!this.anchor) {
+      // 定标：此刻的自然挥速 = 当前播放速度（倍率 1），不改变速度
+      const bpm = this.getRange().currentBpm;
+      this.anchor = { interval: trimmedMean(this.intervals), bpm };
+      this.bpm = bpm;
+      this.handlers.onCalibrated?.();
+      return;
+    }
     const est = RECENT_WEIGHT * interval + (1 - RECENT_WEIGHT) * trimmedMean(this.intervals);
-    this.emitTempo((60000 * k) / est, "beat");
+    this.emitTempo(this.toBpm(est), "beat");
   }
 
   /** 回弹顶点：记录这一拍的幅度，更新力度 */
@@ -207,20 +225,35 @@ export class Conductor {
     if (dur <= 0) return;
     this.reboundDur = dur;
     // 还没建立稳定速度时不预测
-    if (this.bpm === null || this.reboundSamples < REBOUND_MIN_SAMPLES) return;
+    if (!this.anchor || this.bpm === null || this.reboundSamples < REBOUND_MIN_SAMPLES) return;
     const predictedInterval = dur / this.reboundRatio;
-    const k = this.gestureBeats;
-    if (predictedInterval < MIN_INTERVAL_MS || predictedInterval > maxInterval(k)) return;
-    const predicted = (60000 * k) / predictedInterval;
-    if (Math.abs(predicted - this.bpm) / this.bpm < REBOUND_TRIGGER) return;
+    if (predictedInterval < MIN_INTERVAL_MS || predictedInterval > MAX_INTERVAL_MS) return;
+    const predicted = this.toBpm(predictedInterval);
+    const change = predicted / this.bpm - 1;
+    if (Math.abs(change) < REBOUND_TRIGGER) {
+      this.reboundVotes = 0;
+      return;
+    }
+    // 单独一下快抬/慢抬可能只是手势不匀，连续同向才当真
+    const dir = change > 0 ? 1 : -1;
+    this.reboundVotes = Math.sign(this.reboundVotes) === dir ? this.reboundVotes + dir : dir;
+    if (Math.abs(this.reboundVotes) < REBOUND_CONFIRM || this.reboundCooldown > 0) return;
+    this.reboundVotes = 0;
+    this.reboundCooldown = REBOUND_COOLDOWN;
     this.emitTempo(this.bpm + REBOUND_BLEND * (predicted - this.bpm), "rebound");
+  }
+
+  /** 挥动间隔 → 速度：倍率 = 基准间隔 / 当前间隔 */
+  private toBpm(interval: number) {
+    const a = this.anchor!;
+    return a.bpm * (a.interval / interval);
   }
 
   private emitTempo(raw: number, source: "beat" | "rebound") {
     const { minBpm, maxBpm, currentBpm } = this.getRange();
     // 手刚出现还没建立速度时，以当前播放速度为基准
     const base = this.bpm ?? currentBpm;
-    // 不做半速/倍速折叠：挥法由 beatsPerGesture 明确指定；漏检/多检造成的翻倍或减半交给下面的离群确认
+    // 漏检/多检造成的间隔翻倍或减半交给下面的离群确认
     let bpm = clamp(raw, minBpm, maxBpm);
 
     const change = bpm / base - 1;

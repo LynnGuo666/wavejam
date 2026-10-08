@@ -9,8 +9,6 @@ interface HandControlProps {
   maxBpm: number;
   /** 当前实际播放速度，手刚出现时以它为起点 */
   currentBpm: number;
-  /** 挥一下管几拍 */
-  beatsPerGesture: number;
   onBpm: (bpm: number) => void;
   /** 力度 0..1（挥得大 = 强） */
   onDynamics?: (level: number) => void;
@@ -38,6 +36,9 @@ function HandControl(props: HandControlProps) {
   const [handSeen, setHandSeen] = useState(false);
   const [beatCount, setBeatCount] = useState(0);
   const [detectedBpm, setDetectedBpm] = useState<number | null>(null);
+  /** 定标时的播放速度；null = 还在定标 */
+  const [calibBpm, setCalibBpm] = useState<number | null>(null);
+  const [swingsSinceSeen, setSwingsSinceSeen] = useState(0);
   const [rebounding, setRebounding] = useState(false);
 
   // 回调与参数走 ref，避免检测循环闭包拿到旧值
@@ -103,6 +104,7 @@ function HandControl(props: HandControlProps) {
     const trail: Pt[] = [];
     const marks: Pt[] = [];
     let beats = 0;
+    let swings = 0;
     let reboundTimer: ReturnType<typeof setTimeout> | undefined;
 
     const conductor = new Conductor(() => propsRef.current, {
@@ -110,6 +112,8 @@ function HandControl(props: HandControlProps) {
         marks.push(p);
         beats++;
         setBeatCount(beats);
+        swings++;
+        setSwingsSinceSeen(swings);
         propsRef.current.onIctus?.();
       },
       onTempo: (bpm, source) => {
@@ -122,12 +126,20 @@ function HandControl(props: HandControlProps) {
           reboundTimer = setTimeout(() => setRebounding(false), 600);
         }
       },
+      onCalibrated: () => {
+        const bpm = propsRef.current.currentBpm;
+        setCalibBpm(bpm);
+        setDetectedBpm(Math.round(bpm));
+      },
       onDynamics: (level) => propsRef.current.onDynamics?.(level),
     });
 
     const resetTracking = () => {
       conductor.reset();
       trail.length = 0;
+      swings = 0;
+      setSwingsSinceSeen(0);
+      setCalibBpm(null);
     };
 
     const draw = (now: number) => {
@@ -244,7 +256,7 @@ function HandControl(props: HandControlProps) {
   }
 
   const running = status === "running";
-  const dotCount = Math.max(1, Math.round(4 / props.beatsPerGesture));
+  const ratio = calibBpm && detectedBpm ? detectedBpm / calibBpm : 1;
 
   return (
     <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl bg-ink-deep ring-1 ring-line">
@@ -273,7 +285,7 @@ function HandControl(props: HandControlProps) {
               ? "摄像头权限被拒绝。在浏览器地址栏允许摄像头后再试一次。"
               : status === "error"
                 ? "手势模型没能加载，检查网络后再试一次。没有摄像头也可以用下方的点按测速。"
-                : "手掌对着镜头上下挥，每次落到最低点算一下。落下后抬手快就加速、慢就放慢，挥大声音强、挥小声音弱。"}
+                : "手掌对着镜头，按你舒服的快慢上下挥。先挥 3 下定基准，之后挥得比基准快就加速、慢就放慢；挥大声音强，挥小声音弱。"}
           </p>
         </div>
       )}
@@ -296,23 +308,27 @@ function HandControl(props: HandControlProps) {
             </button>
           </div>
           <div className="absolute inset-x-3 bottom-3 flex items-end justify-between">
-            {/* 一小节内的挥动位置：每拍一挥 4 个点，两拍一挥 2 个，一小节一挥 1 个 */}
-            <span className="flex gap-1.5">
-              {Array.from({ length: dotCount }, (_, i) => (
-                <span
-                  key={i}
-                  className={`h-2 w-2 rounded-full transition-colors duration-150 ${
-                    handSeen && beatCount > 0 && (beatCount - 1) % dotCount === i ? "bg-rose" : "bg-ivory/25"
-                  }`}
-                />
-              ))}
+            {/* 定标中：3 个点逐个点亮；定标后：每挥一下闪一次 */}
+            <span className="flex gap-1.5" aria-hidden>
+              {calibBpm === null ? (
+                [0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className={`h-2 w-2 rounded-full transition-colors duration-150 ${
+                      handSeen && swingsSinceSeen > i ? "bg-amber" : "bg-ivory/25"
+                    }`}
+                  />
+                ))
+              ) : (
+                <span key={beatCount} className="swing-dot h-2 w-2 rounded-full bg-rose" />
+              )}
             </span>
             <span className="rounded-md bg-ink-deep/70 px-2 py-1 font-serif text-sm tabular-nums text-amber backdrop-blur">
-              {handSeen
-                ? detectedBpm !== null
-                  ? `${rebounding ? "抬手变速 " : ""}♩ = ${detectedBpm}`
-                  : "再挥两下…"
-                : "手放下 = 回到原速"}
+              {!handSeen
+                ? "手放下 = 回到原速"
+                : calibBpm === null
+                  ? "按舒服的快慢挥 3 下…"
+                  : `${rebounding ? "抬手变速 " : ""}挥速 ×${ratio.toFixed(2)}`}
             </span>
           </div>
         </>

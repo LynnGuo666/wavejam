@@ -29,7 +29,6 @@ export default function Home() {
   const [baseBpm, setBaseBpm] = useState(120);
   const [beat, setBeat] = useState(0);
   const [handActive, setHandActive] = useState(false);
-  const [beatsPerGesture, setBeatsPerGesture] = useState(2);
   const [dynamics, setDynamicsLevel] = useState<number | null>(null);
   const [keyLabel, setKeyLabel] = useState("");
   const [soloFlash, setSoloFlash] = useState<number | null>(null);
@@ -277,41 +276,11 @@ export default function Home() {
             minBpm={handMinBpm}
             maxBpm={handMaxBpm}
             currentBpm={bpm}
-            beatsPerGesture={beatsPerGesture}
             onBpm={changeBpm}
             onDynamics={changeDynamics}
             onHandLost={returnToBase}
             onActiveChange={setHandActive}
           />
-
-          <div className="-mt-2 flex items-center justify-between gap-3 px-1">
-            <span id="gesture-label" className="text-xs text-mute">
-              挥一下管
-            </span>
-            <div
-              role="radiogroup"
-              aria-labelledby="gesture-label"
-              className="grid flex-1 grid-cols-3 gap-1 rounded-xl bg-ink p-1 text-xs ring-1 ring-line"
-            >
-              {[
-                { k: 1, label: "1 拍" },
-                { k: 2, label: "2 拍" },
-                { k: 4, label: "1 小节" },
-              ].map(({ k, label }) => (
-                <button
-                  key={k}
-                  role="radio"
-                  aria-checked={beatsPerGesture === k}
-                  onClick={() => setBeatsPerGesture(k)}
-                  className={`rounded-lg py-1.5 font-medium transition ${
-                    beatsPerGesture === k ? "bg-panel text-amber" : "text-mute hover:text-ivory"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
 
           <div className="rounded-2xl bg-ink p-5 ring-1 ring-line">
             <div className="flex items-end justify-between gap-3">
