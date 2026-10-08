@@ -164,7 +164,7 @@ export default function Home() {
 
   const returnToBase = useCallback(() => {
     engine.returnToBase();
-    engine.setDynamics(1);
+    engine.setDynamics(1, 2);
     setDynamicsLevel(null);
   }, [engine]);
 
@@ -276,7 +276,7 @@ export default function Home() {
           <HandControl
             minBpm={handMinBpm}
             maxBpm={handMaxBpm}
-            refBpm={baseBpm}
+            currentBpm={bpm}
             beatsPerGesture={beatsPerGesture}
             onBpm={changeBpm}
             onDynamics={changeDynamics}

@@ -7,8 +7,8 @@ import { Conductor, type Pt } from "@/lib/conductor";
 interface HandControlProps {
   minBpm: number;
   maxBpm: number;
-  /** 当前参考速度，用于把半速/倍速挥动折叠到最近的合理速度 */
-  refBpm: number;
+  /** 当前实际播放速度，手刚出现时以它为起点 */
+  currentBpm: number;
   /** 挥一下管几拍 */
   beatsPerGesture: number;
   onBpm: (bpm: number) => void;

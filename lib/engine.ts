@@ -246,6 +246,7 @@ export class JamEngine {
   private midi: Midi | null = null;
   private lead: LeadVoice | null = null;
   private noteUiLast = new Map<number, number>();
+  private glideTimer: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval> | undefined;
 
   async load(url: string) {
     this.disposeSong();
@@ -360,6 +361,11 @@ export class JamEngine {
   }
 
   setBpm(bpm: number) {
+    this.cancelGlide();
+    this.applyBpm(bpm);
+  }
+
+  private applyBpm(bpm: number) {
     this.bpm = Math.round(bpm);
     Tone.getTransport().bpm.rampTo(this.bpm, 0.4);
     this.onBpmChange?.(this.bpm);
@@ -369,16 +375,41 @@ export class JamEngine {
    * 力度（指挥图示大小）：0 = pp，1 = f。映射到主音量 -16dB ~ 0dB，
    * 平滑过渡避免逐拍跳变
    */
-  setDynamics(level: number) {
+  setDynamics(level: number, rampSeconds = 0.3) {
     const l = Math.min(1, Math.max(0, level));
-    Tone.getDestination().volume.rampTo(-16 * (1 - l), 0.3);
+    Tone.getDestination().volume.rampTo(-16 * (1 - l), rampSeconds);
   }
 
-  /** 手放下后，用 ~1.5s 滑回原速 */
+  /**
+   * 手放下后回原速：先保持当前速度 2s（手可能只是暂时离开画面），
+   * 再按每秒 6% 原速的速率慢慢滑回，不会突然掉速或冲速。手回来（setBpm）即中止
+   */
   returnToBase() {
-    this.bpm = this.baseBpm;
-    Tone.getTransport().bpm.rampTo(this.baseBpm, 1.5);
-    this.onBpmChange?.(this.baseBpm);
+    this.cancelGlide();
+    const HOLD_MS = 2000;
+    const TICK_MS = 250;
+    const stepBpm = this.baseBpm * 0.06 * (TICK_MS / 1000);
+    let current = Tone.getTransport().bpm.value;
+    this.glideTimer = setTimeout(() => {
+      this.glideTimer = setInterval(() => {
+        const diff = this.baseBpm - current;
+        if (Math.abs(diff) <= stepBpm) {
+          this.cancelGlide();
+          this.applyBpm(this.baseBpm);
+          return;
+        }
+        current += Math.sign(diff) * stepBpm;
+        this.bpm = Math.round(current);
+        Tone.getTransport().bpm.rampTo(current, TICK_MS / 1000);
+        this.onBpmChange?.(this.bpm);
+      }, TICK_MS);
+    }, HOLD_MS);
+  }
+
+  private cancelGlide() {
+    clearTimeout(this.glideTimer as ReturnType<typeof setTimeout>);
+    clearInterval(this.glideTimer as ReturnType<typeof setInterval>);
+    this.glideTimer = undefined;
   }
 
   /**
@@ -430,6 +461,7 @@ export class JamEngine {
   }
 
   private disposeSong() {
+    this.cancelGlide();
     const transport = Tone.getTransport();
     transport.stop();
     transport.cancel();
