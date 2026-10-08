@@ -119,6 +119,11 @@ export class Conductor {
     this.reboundCooldown = 0;
   }
 
+  /** 点按测速：每按一下当作一次落拍，和挥手走同一套定标/倍率/防跳变逻辑 */
+  tap(t: number) {
+    this.ictus({ t, x: 0, y: 0 });
+  }
+
   push(raw: Pt, handSize: number): Pt {
     const prev = this.smooth;
     const s: Pt = prev

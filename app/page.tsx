@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { JamEngine, type TrackInfo } from "@/lib/engine";
 import { SONGS } from "@/lib/songs";
+import { Conductor, type ConductorRange } from "@/lib/conductor";
 import HandControl from "@/components/HandControl";
 import Stage, { StageBus } from "@/components/Stage";
 
@@ -13,6 +14,7 @@ const SOLO_KEYS = ["a", "s", "d", "f", "g", "h", "j", "k"];
 /** 音乐上成立的变速挡位（相对原速的比例） */
 const DETENT_RATIOS = [0.5, 0.75, 0.875, 1, 1.125, 1.25, 1.5, 1.6, 2];
 const SNAP_TOLERANCE = 2.5; // BPM 在挡位 ±2.5 内自动吸附
+const TAP_IDLE_MS = 3000; // 停按超过 3s 视为重新开始，下次重新定标
 
 export default function Home() {
   const [engine] = useState(() => new JamEngine());
@@ -33,7 +35,13 @@ export default function Home() {
   const [dynamics, setDynamicsLevel] = useState<number | null>(null);
   const [keyLabel, setKeyLabel] = useState("");
   const [soloFlash, setSoloFlash] = useState<number | null>(null);
-  const tapTimesRef = useRef<number[]>([]);
+  // 点按测速与挥手共用 Conductor：前 3 下定标，之后按相对倍率变速，同样防跳变
+  const tapRangeRef = useRef<ConductorRange>({ minBpm: 60, maxBpm: 200, currentBpm: 120 });
+  const tapBpmRef = useRef<(bpm: number) => void>(() => {});
+  const tapperRef = useRef<Conductor | null>(null);
+  const lastTapRef = useRef(0);
+  const [tapCount, setTapCount] = useState(0);
+  const [tapCalibrated, setTapCalibrated] = useState(false);
 
   const refreshTracks = useCallback(() => setTracks([...engine.tracks]), [engine]);
 
@@ -100,18 +108,33 @@ export default function Home() {
     [engine, baseBpm]
   );
 
+  useEffect(() => {
+    tapBpmRef.current = changeBpm;
+    tapRangeRef.current = {
+      minBpm: Math.round(baseBpm * 0.6),
+      maxBpm: Math.round(baseBpm * 1.6),
+      currentBpm: bpm,
+    };
+  });
+
   const tapTempo = useCallback(() => {
     const now = performance.now();
-    const taps = tapTimesRef.current.filter((t) => now - t < 2500);
-    taps.push(now);
-    tapTimesRef.current = taps;
-    if (taps.length >= 2) {
-      const intervals = taps.slice(1).map((t, i) => t - taps[i]);
-      const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-      const newBpm = Math.min(220, Math.max(40, 60000 / avg));
-      changeBpm(newBpm);
+    if (!tapperRef.current) {
+      tapperRef.current = new Conductor(() => tapRangeRef.current, {
+        onTempo: (v) => tapBpmRef.current(v),
+        onCalibrated: () => setTapCalibrated(true),
+      });
     }
-  }, [changeBpm]);
+    const tapper = tapperRef.current;
+    const fresh = now - lastTapRef.current > TAP_IDLE_MS;
+    if (fresh) {
+      tapper.reset();
+      setTapCalibrated(false);
+    }
+    lastTapRef.current = now;
+    setTapCount((c) => (fresh ? 1 : c + 1));
+    tapper.tap(now);
+  }, []);
 
   const toggleTrack = useCallback(
     (id: number) => {
@@ -143,12 +166,12 @@ export default function Home() {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "Space") {
         e.preventDefault();
-        togglePlay();
+        if (!e.repeat) tapTempo();
         return;
       }
       const key = e.key.toLowerCase();
-      if (key === "t") {
-        tapTempo();
+      if (key === "p") {
+        togglePlay();
         return;
       }
       const soloIdx = SOLO_KEYS.indexOf(key);
@@ -365,18 +388,25 @@ export default function Home() {
               </button>
               <button
                 onClick={tapTempo}
-                className="rounded-xl py-2.5 font-semibold text-ivory ring-1 ring-line transition hover:bg-panel"
+                className="flex flex-col items-center justify-center rounded-xl py-1.5 font-semibold text-ivory ring-1 ring-line transition hover:bg-panel active:bg-panel"
               >
-                点按测速
+                <span>点按测速</span>
+                <span className="text-[10px] font-normal text-mute">
+                  {tapCalibrated
+                    ? "按快加速，按慢减速"
+                    : tapCount > 0
+                      ? `定基准 ${Math.min(tapCount, 3)}/3`
+                      : "空格，先按 3 下定基准"}
+                </span>
               </button>
             </div>
           </div>
 
           <dl className="hidden grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 px-1 text-xs text-mute lg:grid">
             <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">空格</kbd></dt>
+            <dd>点按测速：先按 3 下定基准，之后按快加速、按慢减速</dd>
+            <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">P</kbd></dt>
             <dd>播放 / 暂停</dd>
-            <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">T</kbd></dt>
-            <dd>跟着节奏连按，设定速度</dd>
             <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">1–9</kbd></dt>
             <dd>乐器加入 / 退场，下个小节生效</dd>
             <dt><kbd className="rounded bg-panel px-1.5 py-0.5 text-ivory">A–K</kbd></dt>
