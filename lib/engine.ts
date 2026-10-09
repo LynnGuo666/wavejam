@@ -102,9 +102,34 @@ class SoundfontVoice implements Voice {
       });
   }
 
+  /**
+   * 不走 instrument.play：sample-player 会把每个发声节点存进内部表且永不删除，
+   * 一首歌上万个音符的节点全部滞留，越播越卡。这里直接用已解码的采样，
+   * 每个音只建 BufferSource + Gain 两个节点，播完即断开、可被回收
+   */
   trigger(midi: number, time: number, duration: number, velocity: number) {
     if (this.instrument) {
-      this.instrument.play(midi, time, { duration: Math.max(duration, 0.1), gain: velocity * 2 });
+      const buffer = this.instrument.buffers?.[midi];
+      if (!buffer) return;
+      const start = Math.max(time, this.ctx.currentTime);
+      const end = start + Math.max(duration, 0.1);
+      const peak = velocity * 2;
+      const env = this.ctx.createGain();
+      // 包络沿用 sample-player 默认值：attack 0.01 / decay 0.1 / sustain 0.9 / release 0.3
+      env.gain.setValueAtTime(0, start);
+      env.gain.linearRampToValueAtTime(peak, start + 0.01);
+      env.gain.setTargetAtTime(peak * 0.9, start + 0.01, 0.03);
+      env.gain.setTargetAtTime(0, end, 0.06);
+      env.connect(this.gainNode);
+      const src = this.ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(env);
+      src.onended = () => {
+        src.disconnect();
+        env.disconnect();
+      };
+      src.start(start);
+      src.stop(end + 0.3);
     } else {
       this.fallback.trigger(midi, time, duration, velocity);
     }

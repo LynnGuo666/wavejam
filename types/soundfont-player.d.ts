@@ -9,6 +9,8 @@ declare module "soundfont-player" {
     play(note: number | string, time?: number, options?: PlayOptions): { stop: () => void } | void;
     stop?: (time?: number) => void;
     connect?: (destination: AudioNode) => void;
+    /** 已解码的采样，key 为 MIDI 号 */
+    buffers?: Record<number, AudioBuffer>;
   }
   export interface InstrumentOptions {
     soundfont?: "FluidR3_GM" | "MusyngKite";
