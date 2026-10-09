@@ -276,8 +276,12 @@ export class JamEngine {
   onTrackReady?: (id: number, ok: boolean) => void;
   onTrackApplied?: (id: number) => void;
   onBpmChange?: (bpm: number) => void;
+  /** 整首播完 */
+  onEnded?: () => void;
 
-  setHandlers(h: Pick<JamEngine, "onBeat" | "onNote" | "onTrackReady" | "onTrackApplied" | "onBpmChange">) {
+  setHandlers(
+    h: Pick<JamEngine, "onBeat" | "onNote" | "onTrackReady" | "onTrackApplied" | "onBpmChange" | "onEnded">
+  ) {
     Object.assign(this, h);
   }
 
@@ -369,11 +373,15 @@ export class JamEngine {
     }
 
     transport.bpm.value = this.bpm;
-    transport.loop = true;
-    transport.loopStart = 0;
-    // 循环终点取整到小节线，循环回来后小节不会错位
+    transport.loop = false;
+    // 播完一遍即停：终点取整到小节线，给最后的长音留出余音；
+    // 用 schedule 而非 scheduleOnce，重新播放时该事件仍在
     const barTicks = transport.PPQ * this.beatsPerBar;
-    transport.loopEnd = `${Math.ceil(toToneTicks(midi.durationTicks) / barTicks) * barTicks}i`;
+    const endTicks = Math.ceil(toToneTicks(midi.durationTicks) / barTicks) * barTicks;
+    transport.schedule((time) => {
+      transport.stop(time);
+      Tone.getDraw().schedule(() => this.finish(), time);
+    }, `${endTicks}i`);
     transport.scheduleRepeat((time) => {
       // 从走带位置算拍号内第几拍（而不是自增计数），循环、暂停后都不会漂
       const ticks = transport.getTicksAtTime(time);
@@ -411,6 +419,15 @@ export class JamEngine {
   pause() {
     Tone.getTransport().pause();
     this.state = "paused";
+  }
+
+  /** 播到结尾：停止走带（位置归零），恢复原速，可再次从头播放 */
+  private finish() {
+    this.cancelGlide();
+    for (const t of this.tracks) t.pendingMuted = undefined;
+    this.state = "ready";
+    this.setBpm(this.baseBpm);
+    this.onEnded?.();
   }
 
   setBpm(bpm: number) {

@@ -58,6 +58,10 @@ export default function Home() {
         onTrackReady: () => refreshTracks(),
         onTrackApplied: () => refreshTracks(),
         onBpmChange: (v) => setBpm(v),
+        onEnded: () => {
+          setStatus("ready");
+          refreshTracks();
+        },
       });
       await engine.load(song.file);
       setBaseBpm(engine.baseBpm);
